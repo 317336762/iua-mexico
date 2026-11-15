@@ -57,14 +57,18 @@ def clip_to_poly(src, polygon):
 
 
 def fetch_fast_streets(top_geom) -> gpd.GeoDataFrame | None:
+    # 1. Intento principal con OSMnx usando el área real + buffer de 300m
     try:
         import osmnx as ox
         ox.settings.use_cache = True
-        ox.settings.timeout = 15
-        c = top_geom.centroid
-        G = ox.graph_from_point((c.y, c.x), dist=1100, network_type="drive", simplify=True)
+        ox.settings.timeout = 30
+        
+        # Buffer de ~300m en grados para asegurar cobertura de las unidades críticas
+        search_area = top_geom.buffer(0.003)
+        G = ox.graph_from_polygon(search_area, network_type="all", simplify=True)
         edges = ox.graph_to_gdfs(G, nodes=False).reset_index()
-        edges = edges[edges.intersects(top_geom)].copy()
+        edges = edges[edges.intersects(top_geom.buffer(0.0005))].copy()
+        
         if not edges.empty:
             if "name" in edges.columns:
                 edges["name"] = edges["name"].apply(
@@ -75,6 +79,32 @@ def fetch_fast_streets(top_geom) -> gpd.GeoDataFrame | None:
             return edges[["name", "geometry"]].to_crs("EPSG:4326")
     except Exception:
         pass
+
+    # 2. Respaldo directo vía Overpass API (sin depender de grafos pesados de OSMnx)
+    try:
+        minx, miny, maxx, maxy = top_geom.buffer(0.002).bounds
+        query = f"""
+        [out:json][timeout:25];
+        way["highway"~"primary|secondary|tertiary|residential"]({miny},{minx},{maxy},{maxx});
+        out geom;
+        """
+        resp = requests.post("https://overpass-api.de/api/interpreter", data={"data": query}, timeout=25)
+        if resp.status_code == 200:
+            elements = resp.json().get("elements", [])
+            rows = []
+            for el in elements:
+                coords = [(pt["lon"], pt["lat"]) for pt in el.get("geometry", [])]
+                if len(coords) >= 2:
+                    name = el.get("tags", {}).get("name", "Vialidad prioritaria")
+                    rows.append({"name": name, "geometry": LineString(coords)})
+            if rows:
+                gdf_ov = gpd.GeoDataFrame(rows, crs="EPSG:4326")
+                gdf_ov = gdf_ov[gdf_ov.intersects(top_geom.buffer(0.0005))].copy()
+                if not gdf_ov.empty:
+                    return gdf_ov[["name", "geometry"]]
+    except Exception:
+        pass
+
     return None
 
 def compute_marginacion(gdf_base: gpd.GeoDataFrame, copa_pcts: list, lst_vals: list) -> np.ndarray:
