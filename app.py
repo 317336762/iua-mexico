@@ -267,12 +267,13 @@ def plot_ipcc_plume(df_tx: pd.DataFrame, limite_dias: float, tse_reg: float, umb
     if pd.notna(tse_reg) and 2026 <= float(tse_reg) <= 2100:
         ax.axvline(float(tse_reg), color="#9B2C2C", linestyle="-.", linewidth=1.4, alpha=0.85)
         ax.text(
-            float(tse_reg) + 1.2,
-            ax.get_ylim()[0] + (ax.get_ylim()[1] - ax.get_ylim()[0]) * 0.12,
+            float(tse_reg) + 1.5,
+            limite_dias + 22,
             f"TsE Regional\n(≈ {int(round(tse_reg))})",
             color="#9B2C2C",
-            fontsize=9.5,
-            fontweight="bold"
+            fontsize=9.0,
+            fontweight="bold",
+            bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="none", alpha=0.88),
         )
 
     ax.set_title(f"Proyección Emulada de Días con Temperatura Máxima > {umbral_c} °C — {municipio}", fontsize=12.5, fontweight="bold", color="#0B3C49", pad=14, loc="left")
