@@ -8,6 +8,7 @@ import pystac_client
 import rasterio
 import requests
 from rasterio.mask import mask
+from rasterio.warp import Resampling, reproject
 from rasterstats import zonal_stats
 from shapely.geometry import LineString, box
 
@@ -56,19 +57,134 @@ def clip_to_poly(src, polygon):
     return mask(src, [poly_proj], crop=True)
 
 
+def mask_landsat_c2_qa_pixel(qa_arr: np.ndarray) -> np.ndarray:
+    """
+    Devuelve máscara booleana True para píxeles despejados en Landsat Collection 2 Level-2 QA_PIXEL:
+    Bit 1 (2): Dilated Cloud | Bit 2 (4): Cirrus | Bit 3 (8): Cloud | Bit 4 (16): Cloud Shadow
+    """
+    cloud_bits = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4)
+    return (qa_arr & cloud_bits) == 0
+
+
+def build_landsat_lst_composite(catalog, polygon, lst_tif: str, max_scenes: int = 5) -> int:
+    """
+    Construye una mediana multitemporal de LST estival usando exclusivamente Landsat 8/9,
+    enmascaramiento por píxel con QA_PIXEL y reproyección a una grilla espacial común.
+    Devuelve el número de escenas válidas integradas en el compuesto.
+    """
+    try:
+        search = catalog.search(
+            collections=["landsat-c2-l2"],
+            intersects=polygon.__geo_interface__,
+            datetime="2022-05-01/2026-09-30",
+            query={
+                "eo:cloud_cover": {"lt": 20},
+                "platform": {"in": ["landsat-8", "landsat-9"]},
+            },
+            max_items=12,
+        )
+        items = list(search.items())
+    except Exception:
+        return 0
+
+    # Filtrar solo meses cálidos (mayo a septiembre) y ordenar por menor nubosidad
+    warm_items = [
+        it for it in items
+        if it.datetime is not None and it.datetime.month in (5, 6, 7, 8, 9)
+        and "lwir11" in it.assets
+    ]
+    warm_items.sort(key=lambda it: it.properties.get("eo:cloud_cover", 100.0))
+    selected = warm_items[:max_scenes]
+
+    if not selected:
+        return 0
+
+    stack = []
+    ref_meta = None
+    ref_transform = None
+    ref_crs = None
+    ref_shape = None
+
+    for item in selected:
+        try:
+            with rasterio.open(item.assets["lwir11"].href) as src_lwir:
+                out_lst, out_trans = clip_to_poly(src_lwir, polygon)
+                band_dn = out_lst[0].astype(np.float32)
+                valid_mask = band_dn > 0
+
+                # Aplicar máscara QA_PIXEL si está disponible en el asset
+                qa_asset = item.assets.get("qa_pixel") or item.assets.get("QA_PIXEL")
+                if qa_asset is not None:
+                    with rasterio.open(qa_asset.href) as src_qa:
+                        out_qa, _ = clip_to_poly(src_qa, polygon)
+                        if out_qa[0].shape == band_dn.shape:
+                            valid_mask &= mask_landsat_c2_qa_pixel(out_qa[0])
+
+                lst_c = np.where(
+                    valid_mask,
+                    (band_dn * 0.00341802 + 149.0) - 273.15,
+                    np.nan,
+                ).astype(np.float32)
+
+                # Descartar temperaturas físicamente irreales por nubes no detectadas (< 5 °C o > 68 °C)
+                lst_c = np.where((lst_c >= 5.0) & (lst_c <= 68.0), lst_c, np.nan)
+
+                if np.isnan(lst_c).all():
+                    continue
+
+                if ref_meta is None:
+                    ref_crs = src_lwir.crs
+                    ref_transform = out_trans
+                    ref_shape = lst_c.shape
+                    ref_meta = src_lwir.meta.copy()
+                    ref_meta.update({
+                        "dtype": "float32",
+                        "nodata": np.nan,
+                        "height": ref_shape[0],
+                        "width": ref_shape[1],
+                        "transform": ref_transform,
+                    })
+                    stack.append(lst_c)
+                else:
+                    # Reproyectar y remuestrear a la grilla común de referencia antes de apilar
+                    aligned_lst = np.full(ref_shape, np.nan, dtype=np.float32)
+                    reproject(
+                        source=lst_c,
+                        destination=aligned_lst,
+                        src_transform=out_trans,
+                        src_crs=src_lwir.crs,
+                        dst_transform=ref_transform,
+                        dst_crs=ref_crs,
+                        src_nodata=np.nan,
+                        dst_nodata=np.nan,
+                        resampling=Resampling.bilinear,
+                    )
+                    if not np.isnan(aligned_lst).all():
+                        stack.append(aligned_lst)
+        except Exception:
+            continue
+
+    if not stack or ref_meta is None:
+        return 0
+
+    arr_stack = np.stack(stack, axis=0)
+    median_lst = np.nanmedian(arr_stack, axis=0).astype(np.float32)
+
+    with rasterio.open(lst_tif, "w", **ref_meta) as dst:
+        dst.write(median_lst, 1)
+
+    return len(stack)
+
+
 def fetch_fast_streets(top_geom) -> gpd.GeoDataFrame | None:
-    # 1. Intento principal con OSMnx usando el área real + buffer de 300m
     try:
         import osmnx as ox
         ox.settings.use_cache = True
         ox.settings.timeout = 30
-        
-        # Buffer de ~300m en grados para asegurar cobertura de las unidades críticas
         search_area = top_geom.buffer(0.003)
         G = ox.graph_from_polygon(search_area, network_type="all", simplify=True)
         edges = ox.graph_to_gdfs(G, nodes=False).reset_index()
         edges = edges[edges.intersects(top_geom.buffer(0.0005))].copy()
-        
         if not edges.empty:
             if "name" in edges.columns:
                 edges["name"] = edges["name"].apply(
@@ -80,7 +196,6 @@ def fetch_fast_streets(top_geom) -> gpd.GeoDataFrame | None:
     except Exception:
         pass
 
-    # 2. Respaldo directo vía Overpass API (sin depender de grafos pesados de OSMnx)
     try:
         minx, miny, maxx, maxy = top_geom.buffer(0.002).bounds
         query = f"""
@@ -107,24 +222,33 @@ def fetch_fast_streets(top_geom) -> gpd.GeoDataFrame | None:
 
     return None
 
-def compute_marginacion(gdf_base: gpd.GeoDataFrame, copa_pcts: list, lst_vals: list) -> np.ndarray:
-    fallback = np.round(np.clip(100 - np.array(copa_pcts) * 2.2 + (np.array(lst_vals) - np.mean(lst_vals)) * 4, 5, 95), 2)
+
+def compute_marginacion(gdf_base: gpd.GeoDataFrame) -> np.ndarray:
+    """
+    Carga el índice de marginación oficial de CONAPO por CVEGEO.
+    Si no existe el insumo o no cruza, devuelve NaN (nunca sintetiza marginación a partir de variables biofísicas).
+    """
+    nan_arr = np.full(len(gdf_base), np.nan, dtype=float)
     conapo_csv = "data/raw/sig/marginacion_conapo.csv"
     if not os.path.exists(conapo_csv):
-        return fallback
+        return nan_arr
     try:
         df_con = pd.read_csv(conapo_csv, dtype={"CVEGEO": str})
         val_col = next((c for c in ["IMN_2020", "IM_2020", "IMN", "IM"] if c in df_con.columns), None)
         if not val_col or "CVEGEO" not in df_con.columns:
-            return fallback
+            return nan_arr
         m_map = dict(zip(df_con["CVEGEO"].str.strip(), pd.to_numeric(df_con[val_col], errors="coerce")))
         raw_m = gdf_base["Clave_AGEB"].astype(str).map(m_map)
         if not raw_m.notna().any():
-            return fallback
-        m_norm = 100.0 * (1.0 - raw_m) if "IMN" in val_col else (raw_m - raw_m.min()) / max(raw_m.max() - raw_m.min(), 1e-6) * 100.0
-        return np.round(m_norm.fillna(50.0).values, 2)
+            return nan_arr
+        m_norm = (
+            100.0 * (1.0 - raw_m)
+            if "IMN" in val_col
+            else (raw_m - raw_m.min()) / max(raw_m.max() - raw_m.min(), 1e-6) * 100.0
+        )
+        return np.round(m_norm.values, 2)
     except Exception:
-        return fallback
+        return nan_arr
 
 
 def compute_prioridad_sombra(
@@ -148,6 +272,7 @@ def compute_prioridad_sombra(
         gdf_units = build_urban_grid_or_ageb(polygon)
         bbox = list(polygon.bounds)
         wc_real, lst_real = False, False
+        n_escenas_lst = 0
 
         catalog = pystac_client.Client.open(
             "https://planetarycomputer.microsoft.com/api/stac/v1",
@@ -176,48 +301,43 @@ def compute_prioridad_sombra(
                 total_px = sum(v for k, v in st.items() if k != 0)
                 copa_pcts.append(round((st.get(10, 0) / total_px * 100.0) if total_px > 0 else 5.0, 2))
         else:
-            copa_pcts = [8.0] * len(gdf_units)
+            copa_pcts = [np.nan] * len(gdf_units)
 
         lst_tif = os.path.join(mun_dir, "lst_verano.tif")
         if not os.path.exists(lst_tif):
-            try:
-                items_ls = list(catalog.search(
-                    collections=["landsat-c2-l2"],
-                    intersects=polygon.__geo_interface__,
-                    datetime="2023-06-01/2025-09-30",
-                    query={"eo:cloud_cover": {"lt": 15}},
-                    max_items=2,
-                ).items())
-                if items_ls and "lwir11" in items_ls[0].assets:
-                    with rasterio.open(items_ls[0].assets["lwir11"].href) as src:
-                        out_lst, out_trans = clip_to_poly(src, polygon)
-                        lst_c = np.where(out_lst > 0, (out_lst * 0.00341802 + 149.0) - 273.15, np.nan).astype(np.float32)
-                        meta = src.meta.copy()
-                        meta.update({"dtype": "float32", "nodata": np.nan, "height": lst_c.shape[1], "width": lst_c.shape[2], "transform": out_trans})
-                        with rasterio.open(lst_tif, "w", **meta) as dst:
-                            dst.write(lst_c)
-            except Exception:
-                pass
+            n_escenas_lst = build_landsat_lst_composite(catalog, polygon, lst_tif, max_scenes=5)
+        else:
+            n_escenas_lst = 1
 
         if os.path.exists(lst_tif):
             lst_real = True
             gdf_lst = gdf_units.to_crs(rasterio.open(lst_tif).crs)
-            lst_vals = [round(float(s["mean"]), 2) if s["mean"] is not None else 38.0 for s in zonal_stats(gdf_lst, lst_tif, stats=["mean"])]
+            lst_vals = [
+                round(float(s["mean"]), 2) if s["mean"] is not None else np.nan
+                for s in zonal_stats(gdf_lst, lst_tif, stats=["mean"])
+            ]
         else:
-            lst_vals = [38.0] * len(gdf_units)
+            lst_vals = [np.nan] * len(gdf_units)
 
         gdf_base = gdf_units.copy()
         gdf_base["Copa_pct"] = copa_pcts
         gdf_base["LST_verano_C"] = lst_vals
-        gdf_base["Marginacion_idx"] = compute_marginacion(gdf_base, copa_pcts, lst_vals)
+        gdf_base["Marginacion_idx"] = compute_marginacion(gdf_base)
         gdf_base.to_file(base_geojson, driver="GeoJSON")
 
-        delta_icu_aire = round(float(np.clip((np.percentile(lst_vals, 90) - np.percentile(lst_vals, 25)) * 0.45, 1.2, 2.2)), 2)
+        valid_lst = pd.Series(lst_vals).dropna()
+        if len(valid_lst) >= 4:
+            # Parametrización empírica de cribado LST -> ΔICU aire (Voogt & Oke, 2003; Mildrexler et al., 2011)
+            delta_icu_aire = round(float(np.clip((np.percentile(valid_lst, 90) - np.percentile(valid_lst, 25)) * 0.45, 1.2, 2.2)), 2)
+        else:
+            delta_icu_aire = 1.5
+
         summary = {
             "delta_icu_aire_c": delta_icu_aire,
             "altura_edificios_m": 6.5,
             "wc_real": wc_real,
             "lst_real": lst_real,
+            "lst_escenas_compuesto": n_escenas_lst,
         }
         with open(meta_json, "w", encoding="utf-8") as f:
             json.dump(summary, f)
@@ -226,26 +346,43 @@ def compute_prioridad_sombra(
     wC, wT, wS = pesos
     copa_arbol = cfg["prioridad_sombra"]["copa_arbol_adulto_m2"]
 
-    df["FC"] = 100.0 * (meta_copa - np.minimum(df["Copa_pct"], meta_copa)) / max(meta_copa, 1.0)
-    t_min, t_max = df["LST_verano_C"].min(), df["LST_verano_C"].max()
-    df["FT"] = 0.0 if t_max == t_min else 100.0 * (df["LST_verano_C"] - t_min) / (t_max - t_min)
-    m_min, m_max = df["Marginacion_idx"].min(), df["Marginacion_idx"].max()
-    df["FS"] = 0.0 if m_max == m_min else 100.0 * (df["Marginacion_idx"] - m_min) / (m_max - m_min)
+    copa_series = df["Copa_pct"].fillna(df["Copa_pct"].median() if df["Copa_pct"].notna().any() else 8.0)
+    lst_series = df["LST_verano_C"].fillna(df["LST_verano_C"].median() if df["LST_verano_C"].notna().any() else 36.0)
 
-    df["IPS"] = np.round(wC * df["FC"] + wT * df["FT"] + wS * df["FS"], 2)
+    df["FC"] = 100.0 * (meta_copa - np.minimum(copa_series, meta_copa)) / max(meta_copa, 1.0)
+    t_min, t_max = lst_series.min(), lst_series.max()
+    df["FT"] = 0.0 if t_max == t_min else 100.0 * (lst_series - t_min) / (t_max - t_min)
+
+    # Versión puramente biofísica (siempre comparable entre todos los municipios del país)
+    w_bio_sum = max(wC + wT, 1e-6)
+    df["IPS_biofisico"] = np.round((wC / w_bio_sum) * df["FC"] + (wT / w_bio_sum) * df["FT"], 2)
+
+    has_conapo = "Marginacion_idx" in df.columns and df["Marginacion_idx"].notna().any()
+    if has_conapo:
+        m_valid = df["Marginacion_idx"].fillna(df["Marginacion_idx"].median())
+        m_min, m_max = m_valid.min(), m_valid.max()
+        df["FS"] = 0.0 if m_max == m_min else 100.0 * (m_valid - m_min) / (m_max - m_min)
+        df["IPS"] = np.round(wC * df["FC"] + wT * df["FT"] + wS * df["FS"], 2)
+        summary["conapo_real"] = True
+    else:
+        # Sin capa CONAPO: renormaliza pesos biofísicos y declara explícitamente la escala
+        df["FS"] = np.nan
+        df["IPS"] = df["IPS_biofisico"]
+        summary["conapo_real"] = False
+
     df["Lugar"] = df["IPS"].rank(ascending=False, method="min").astype(int)
-    p80 = np.percentile(df["IPS"], 80)
+    p80 = np.percentile(df["IPS"].dropna(), 80) if df["IPS"].notna().any() else 50.0
     df["Prioridad"] = np.where(
-        df["Copa_pct"] >= meta_copa,
+        copa_series >= meta_copa,
         "Conservación (cumple la meta)",
         np.where(df["IPS"] >= p80, "Quintil superior", "Resto"),
     )
-    df["Brecha_copa_ha"] = np.round(np.maximum(0.0, (meta_copa - df["Copa_pct"]) / 100.0 * df["Area_ha"]), 3)
+    df["Brecha_copa_ha"] = np.round(np.maximum(0.0, (meta_copa - copa_series) / 100.0 * df["Area_ha"]), 3)
     df["Arboles_equivalentes"] = np.round(df["Brecha_copa_ha"] * 10000.0 / copa_arbol, 0).astype(int)
     df = df.sort_values("Lugar").reset_index(drop=True)
 
-    summary["copa_media_pct"] = round(float(df["Copa_pct"].mean()), 2)
-    summary["lst_media_c"] = round(float(df["LST_verano_C"].mean()), 2)
+    summary["copa_media_pct"] = round(float(copa_series.mean()), 2)
+    summary["lst_media_c"] = round(float(lst_series.mean()), 2)
     summary["brecha_total_ha"] = round(float(df["Brecha_copa_ha"].sum()), 2)
     summary["arboles_totales"] = int(df["Arboles_equivalentes"].sum())
 
