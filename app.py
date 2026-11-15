@@ -15,13 +15,8 @@ from src.pdf_builder import build_executive_pdf
 
 st.set_page_config(page_title="IUA México", layout="wide")
 
-# Pega tu etiqueta de verificación aquí:
-st.markdown(
-    '<meta name="google-site-verification" content="4lC6jg8M4iUpB0Inw8oPO8dLaBgW2QqVnyBT5CapU9g" />',
-    unsafe_allow_html=True
-)
-
-plt.rcParams["font.sans-serif"] = ["Plus Jakarta Sans", "DejaVu Sans", "Arial"]plt.rcParams["axes.edgecolor"] = "#CBD5E1"
+plt.rcParams["font.sans-serif"] = ["Plus Jakarta Sans", "DejaVu Sans", "Arial"]
+plt.rcParams["axes.edgecolor"] = "#CBD5E1"
 plt.rcParams["axes.linewidth"] = 0.8
 
 st.markdown("""
