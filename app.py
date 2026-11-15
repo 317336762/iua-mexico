@@ -15,6 +15,15 @@ from src.pdf_builder import build_executive_pdf
 
 st.set_page_config(page_title="IUA México", layout="wide")
 
+# --- CARGAR DATOS PRECOMPUTADOS OPTIMIZADOS ---
+@st.cache_data
+def cargar_datos_municipales():
+    ruta_parquet = "data/processed/iua_resumen_municipal.parquet"
+    return gpd.read_parquet(ruta_parquet)
+
+gdf_municipios = cargar_datos_municipales()
+# ---------------------------------------------
+
 plt.rcParams["font.sans-serif"] = ["Plus Jakarta Sans", "DejaVu Sans", "Arial"]
 plt.rcParams["axes.edgecolor"] = "#CBD5E1"
 plt.rcParams["axes.linewidth"] = 0.8
