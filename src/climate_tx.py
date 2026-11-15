@@ -37,6 +37,7 @@ def extract_historical_tx_series(
         "fuente_clima": "Reanálisis ERA5 vía Open-Meteo (1950–2024)",
         "umbral_efectivo_C": umbral_tx,
         "p99_lluvia_mm": 50.0,
+        "ref_daily_tmax": None,
     }
     daily = None
 
@@ -97,9 +98,17 @@ def extract_historical_tx_series(
             Lluvia_max_24h=("rain", "max"),
         ).reset_index()
 
+        # Guardar distribución diaria por año de referencia (1981-2010) para emulación física
+        ref_years_arrays = [
+            g["tmax"].to_numpy(dtype=np.float32)
+            for _, g in ref_d.groupby("Anio")
+            if len(g) >= 360
+        ]
+
         flags["era5_real"] = True
         flags["umbral_efectivo_C"] = umbral_tx
         flags["p99_lluvia_mm"] = round(umbral_lluvia, 1)
+        flags["ref_daily_tmax"] = ref_years_arrays
         return grp, flags
 
     # Solo accesible explícitamente cuando strict_mode=False (Modo Demostración)
@@ -130,7 +139,6 @@ def fetch_cmip6_local(polygon) -> tuple[dict | None, dict]:
         "horizonte_anios": 55.0,             # Punto medio 2050 vs línea base 1981-2010 (1995)
         "modelos": ["ACCESS-CM2", "MPI-ESM1-2-HR", "MRI-ESM2-0"],
     }
-
     if not os.path.exists(cmip_json):
         return None, meta_default
     try:
@@ -154,6 +162,7 @@ def generate_serie_tx_and_tpa(
     umbral_tx: float = 35.0,
     tau_consolidacion: float = 12.0,
     strict_mode: bool = True,
+    ref_daily_tmax: list[np.ndarray] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, float, bool]:
     ref_window = df_hist[(df_hist["Anio"] >= 1981) & (df_hist["Anio"] <= 2010)]
     limite_dias = float(ref_window["Ref_historica"].max()) if not ref_window.empty else 30.0
@@ -184,47 +193,49 @@ def generate_serie_tx_and_tpa(
             "Se bloquea el escalamiento heurístico en modo estricto. Active Modo Demostración para vistas ilustrativas."
         )
 
-    # Parámetros de emulación de días cálidos:
-    # Cuando cmip6_real=True, las tasas se anclan al delta térmico real del ensamble CMIP6.
-    # Los factores siguientes solo operan en Modo Demostración (strict_mode=False).
     scenarios = {
-        "SSP2-4.5 P10": (0.42, 0.90),
-        "SSP2-4.5 P50 (mediana)": (0.68, 1.15),
-        "SSP2-4.5 P90": (0.98, 1.45),
-        "SSP5-8.5 P10": (0.78, 1.30),
-        "SSP5-8.5 P50 (mediana)": (1.15, 1.70),
-        "SSP5-8.5 P90": (1.60, 2.15),
+        "SSP2-4.5 P10": 0.90,
+        "SSP2-4.5 P50 (mediana)": 1.15,
+        "SSP2-4.5 P90": 1.45,
+        "SSP5-8.5 P10": 1.30,
+        "SSP5-8.5 P50 (mediana)": 1.70,
+        "SSP5-8.5 P90": 2.15,
     }
 
     rng = np.random.default_rng(42)
     fut_mask = df_tx["Año"] >= 2015
-    dt_yrs = (df_tx.loc[fut_mask, "Año"] - 2015).to_numpy(dtype=float)
-    shared_noise = rng.normal(0, 3.5, len(dt_yrs))
+    fut_years = df_tx.loc[fut_mask, "Año"].to_numpy(dtype=float)
+    # Desplazamiento térmico respecto al centro del periodo base 1981-2010 (1995.5)
+    dt_from_ref = fut_years - 1995.5
 
-    base_2015 = float(df_tx[df_tx["Año"].between(1995, 2020)]["Ref_historica"].mean())
-    if np.isnan(base_2015):
-        base_2015 = limite_dias * 0.60
+    has_daily_clim = bool(ref_daily_tmax) and len(ref_daily_tmax) >= 10
+    if has_daily_clim:
+        # Secuencia fija de años análogos (1981-2010) compartida entre escenarios para garantizar monotonicidad
+        sampled_idx = rng.integers(0, len(ref_daily_tmax), size=len(fut_years))
+    else:
+        shared_noise = rng.normal(0, 3.5, len(fut_years))
+        base_2015 = float(df_tx[df_tx["Año"].between(1995, 2020)]["Ref_historica"].mean())
+        if np.isnan(base_2015):
+            base_2015 = limite_dias * 0.60
 
     ref_tmax_mean = float(ref_window["Tmax_media"].mean()) if not ref_window.empty else 28.0
     delta_tmax_icu = 0.25 * float(delta_icu_c)
 
-    # Cota dinámica para casos donde el rebase ocurre posterior a 2100
     horizonte_max = max(2100 - anio_base, 1)
     iua_cota_2100 = round(float(tau_consolidacion) / float(horizonte_max), 3)
 
-    unidad_cmip = cmip_meta.get("unidad", "temperatura_absoluta_C")
+    unidad_cmip = cmip_meta.get("unidad", "anomalia_C")
     horizonte_cmip = float(cmip_meta.get("horizonte_anios", 55.0))
 
     tpa_rows = []
     prev_tse_by_scen = {}
 
-    for col_name, (days_rate_base, mult_scen) in scenarios.items():
+    for col_name, mult_scen in scenarios.items():
         scen_label, perc_label = col_name.split(" ", 1)
         r_scen = r_base * mult_scen
-        days_rate = days_rate_base
         metodo_fuente = (
-            "Proyección emulada a partir de anomalías CMIP6 (WorldClim 2.1) + tendencia observada ERA5"
-            if cmip6_real
+            "Desplazamiento térmico (Delta-Change) sobre climatología diaria ERA5 (1981–2010) anclado a CMIP6 (WorldClim 2.1)"
+            if (cmip6_real and has_daily_clim)
             else "DEMONSTRACIÓN: Escalamiento heurístico de tendencia (no es salida de ensamble CMIP6)"
         )
 
@@ -239,7 +250,6 @@ def generate_serie_tx_and_tpa(
                 q = 10 if "P10" in col_name else (90 if "P90" in col_name else 50)
                 raw_val = float(np.percentile(vals, q))
 
-                # Conversión explícita por metadato de unidad (sin umbral heurístico < 10.0)
                 if unidad_cmip == "anomalia_C":
                     delta_cmip = raw_val
                 else:
@@ -248,11 +258,23 @@ def generate_serie_tx_and_tpa(
                 delta_cmip = max(delta_cmip, 0.3)
                 q_scale = 0.85 if q == 10 else (1.18 if q == 90 else 1.0)
                 r_scen = (delta_cmip / horizonte_cmip) * q_scale
-                days_rate = days_rate_base * (r_scen / (r_base * mult_scen))
 
         r_scen = round(float(r_scen), 4)
-        accel = 1.0 + (0.007 * dt_yrs if "SSP5" in col_name else 0.0015 * dt_yrs)
-        sim_days = np.round(np.clip(base_2015 + days_rate * dt_yrs * accel + shared_noise, 0, 365), 1)
+        # Aceleración radiativa suave en SSP5-8.5 vs trayectoria estabilizada en SSP2-4.5
+        accel = 1.0 + (0.0035 * np.maximum(0, fut_years - 2020) if "SSP5" in col_name else 0.0005 * np.maximum(0, fut_years - 2020))
+        delta_t_series = r_scen * dt_from_ref * accel
+
+        if has_daily_clim:
+            # Emulación física Delta-Change: suma ΔT(t) a la distribución diaria real y cuenta excedencias
+            sim_days = np.array([
+                float(np.sum((ref_daily_tmax[idx] + d_t) > umbral_tx))
+                for idx, d_t in zip(sampled_idx, delta_t_series)
+            ], dtype=float)
+        else:
+            days_rate = 0.65 * (r_scen / 0.03)
+            dt_2015 = fut_years - 2015.0
+            sim_days = np.round(np.clip(base_2015 + days_rate * dt_2015 + shared_noise, 0, 365), 1)
+
         df_tx.loc[fut_mask, col_name] = sim_days
 
         roll_20 = df_tx[col_name].rolling(20, min_periods=20).mean()
@@ -261,41 +283,6 @@ def generate_serie_tx_and_tpa(
         exceed = central_years[(roll_20 > limite_dias) & (central_years >= 2024)]
         if not exceed.empty:
             tse_reg = int(exceed.min())
-            # Garantiza monotonicidad física: TsE(P10) >= TsE(P50) >= TsE(P90)
             if scen_label in prev_tse_by_scen and prev_tse_by_scen[scen_label] is not None:
                 if tse_reg > prev_tse_by_scen[scen_label]:
-                    tse_reg = prev_tse_by_scen[scen_label]
-            prev_tse_by_scen[scen_label] = tse_reg
-
-            adelanto_icu = round(delta_tmax_icu / max(r_scen, 0.015), 1)
-            tse_icu = round(tse_reg - adelanto_icu, 1)
-            tpa_reg = round(float(tse_reg - anio_base), 1)
-            tpa_icu = round(float(tse_icu - anio_base), 1)
-            estado_horizonte = "Dentro de horizonte 2100"
-            iua_ref = round(float(tau_consolidacion) / max(tpa_icu, 0.5), 3) if tpa_icu > 0 else np.nan
-            iua_etiqueta = f"{iua_ref:.2f}" if tpa_icu > 0 else "Rebasado"
-        else:
-            # Sin imposición arbitraria de 2085/2065: se reporta explícitamente >2100
-            tse_reg = np.nan
-            adelanto_icu = round(delta_tmax_icu / max(r_scen, 0.015), 1)
-            tse_icu = np.nan
-            tpa_reg = np.nan
-            tpa_icu = np.nan
-            estado_horizonte = ">2100 (sin rebase en siglo XXI)"
-            iua_etiqueta = f"< {iua_cota_2100:.2f} (>2100)"
-
-        tpa_rows.append({
-            "Escenario": scen_label,
-            "Percentil": perc_label,
-            "TSE_regional": tse_reg,
-            "TpA_anios": tpa_reg,
-            "r_tendencia_C_anio": r_scen,
-            "Adelanto_ICU_anios": adelanto_icu,
-            "TSE_con_ICU": tse_icu,
-            "TpA_con_ICU": tpa_icu,
-            "Horizonte": estado_horizonte,
-            "IUA_acotado": iua_etiqueta,
-            "Metodo_proyeccion": metodo_fuente,
-        })
-
-    return df_tx, pd.DataFrame(tpa_rows), limite_dias, cmip6_real
+                    tse

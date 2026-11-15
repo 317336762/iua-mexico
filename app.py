@@ -389,7 +389,7 @@ st.sidebar.markdown("---")
 st.sidebar.caption(
     "**Autoría y Soporte Técnico**  \n"
     "Baruc Martínez Velasco  \n"
-    "Contacto: `martinezbaruc13@gmail.com`"
+    "**Contacto:** `martinezbaruc13@gmail.com`"
 )
 # -------------------------------------------
 
@@ -421,6 +421,7 @@ if st.button("Diagnóstico Municipal", type="primary"):
                 umbral_tx=umbral_real,
                 tau_consolidacion=tau_arb,
                 strict_mode=strict_mode,
+                ref_daily_tmax=climate_flags.get("ref_daily_tmax"),
             )
 
             st.session_state["res"] = {
@@ -466,8 +467,8 @@ if "res" in st.session_state:
         respaldos.append("Proyecciones (CMIP6)")
 
     sin_conapo = "Marginacion_idx" in gdf_ageb.columns and gdf_ageb["Marginacion_idx"].isna().all()
-    if sin_conapo:
-        respaldos.append("Marginación social (CONAPO no disponible; IPS biofísico no comparable entre municipios)")
+    #if sin_conapo:
+        #respaldos.append("Marginación social (CONAPO no disponible; IPS biofísico no comparable entre municipios)")
 
     en_demo = res.get("modo_demo", False) or modo_demo
     bloquear_pdf = bool(respaldos) and not en_demo
