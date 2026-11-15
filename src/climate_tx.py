@@ -287,4 +287,37 @@ def generate_serie_tx_and_tpa(
             tse_reg = int(exceed.min())
             if scen_label in prev_tse_by_scen and prev_tse_by_scen[scen_label] is not None:
                 if tse_reg > prev_tse_by_scen[scen_label]:
-                    tse
+                    tse_reg = prev_tse_by_scen[scen_label]
+            prev_tse_by_scen[scen_label] = tse_reg
+
+            adelanto_icu = round(delta_tmax_icu / max(r_scen, 0.015), 1)
+            tse_icu = round(tse_reg - adelanto_icu, 1)
+            tpa_reg = round(float(tse_reg - anio_base), 1)
+            tpa_icu = round(float(tse_icu - anio_base), 1)
+            estado_horizonte = "Dentro de horizonte 2100"
+            iua_ref = round(float(tau_consolidacion) / max(tpa_icu, 0.5), 3) if tpa_icu > 0 else np.nan
+            iua_etiqueta = f"{iua_ref:.2f}" if tpa_icu > 0 else "Rebasado"
+        else:
+            tse_reg = np.nan
+            adelanto_icu = round(delta_tmax_icu / max(r_scen, 0.015), 1)
+            tse_icu = np.nan
+            tpa_reg = np.nan
+            tpa_icu = np.nan
+            estado_horizonte = ">2100 (sin rebase en siglo XXI)"
+            iua_etiqueta = f"< {iua_cota_2100:.2f} (>2100)"
+
+        tpa_rows.append({
+            "Escenario": scen_label,
+            "Percentil": perc_label,
+            "TSE_regional": tse_reg,
+            "TpA_anios": tpa_reg,
+            "r_tendencia_C_anio": r_scen,
+            "Adelanto_ICU_anios": adelanto_icu,
+            "TSE_con_ICU": tse_icu,
+            "TpA_con_ICU": tpa_icu,
+            "Horizonte": estado_horizonte,
+            "IUA_acotado": iua_etiqueta,
+            "Metodo_proyeccion": metodo_fuente,
+        })
+
+    return df_tx, pd.DataFrame(tpa_rows), limite_dias, cmip6_real
