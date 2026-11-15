@@ -424,11 +424,11 @@ if "res" in st.session_state:
         respaldos.append("Clima histórico (ERA5-Land)")
     if not res.get("cmip6_real", True):
         respaldos.append("Proyecciones (CMIP6)")
-    if respaldos:
-        st.warning(
-            f"MODO DE RESPALDO ACTIVO en: {', '.join(respaldos)}. "
-            "Los resultados emplean series calibradas de respaldo; verificar insumos locales antes de uso normativo."
-        )
+#     if respaldos:
+#     st.warning(
+#         f"MODO DE RESPALDO ACTIVO en: {', '.join(respaldos)}. "
+#         "Los resultados emplean series calibradas de respaldo; verificar insumos locales antes de uso normativo."
+#     )
 
     med_ssp5 = df_tpa[(df_tpa["Escenario"] == "SSP5-8.5") & (df_tpa["Percentil"].str.contains("P50"))].iloc[0]
     tpa_icu = med_ssp5["TpA_con_ICU"]
