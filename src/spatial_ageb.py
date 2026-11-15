@@ -20,16 +20,32 @@ def get_utm_epsg(lon: float) -> str:
 
 
 def build_urban_grid_or_ageb(polygon) -> gpd.GeoDataFrame:
-    ageb_local = "data/raw/sig/ageb.shp"
     utm = get_utm_epsg(polygon.centroid.x)
+    ageb_candidates = [
+        "data/raw/sig/ageb.parquet",
+        "data/raw/sig/ageb.gpkg",
+        "data/raw/sig/ageb.geojson.gz",
+        "data/raw/sig/ageb.shp",
+    ]
+    ageb_local = next((p for p in ageb_candidates if os.path.exists(p)), None)
 
-    if os.path.exists(ageb_local):
-        gdf = gpd.read_file(ageb_local).to_crs("EPSG:4326")
+    if ageb_local is not None:
+        gdf = (
+            gpd.read_parquet(ageb_local)
+            if ageb_local.endswith(".parquet")
+            else gpd.read_file(ageb_local)
+        )
+        if gdf.crs is None:
+            gdf = gdf.set_crs("EPSG:4326")
+        else:
+            gdf = gdf.to_crs("EPSG:4326")
+
         gdf = gdf[gdf.intersects(polygon)].copy()
         if not gdf.empty:
             cve_col = next((c for c in ["CVEGEO", "CVE_AGEB", "cvegeo"] if c in gdf.columns), None)
-            gdf["Clave_AGEB"] = gdf[cve_col] if cve_col else [f"AGEB_{i+1:04d}" for i in range(len(gdf))]
-            gdf["Colonia_Ref"] = gdf["NOM_LOC"] if "NOM_LOC" in gdf.columns else "AGEB Urbana"
+            nom_col = next((c for c in ["NOM_LOC", "COLONIA", "NOM_MUN", "nom_loc"] if c in gdf.columns), None)
+            gdf["Clave_AGEB"] = gdf[cve_col].astype(str).str.strip() if cve_col else [f"AGEB_{i+1:04d}" for i in range(len(gdf))]
+            gdf["Colonia_Ref"] = gdf[nom_col].fillna("AGEB Urbana").astype(str) if nom_col else "AGEB Urbana"
             gdf["Area_ha"] = gdf.to_crs(utm).geometry.area / 10000.0
             return gdf[["Clave_AGEB", "Colonia_Ref", "Area_ha", "geometry"]]
 
@@ -49,7 +65,7 @@ def build_urban_grid_or_ageb(polygon) -> gpd.GeoDataFrame:
                 })
                 idx += 1
 
-    return gpd.GeoDataFrame(cells, crs=utm).to_crs("EPSG:4326")
+    return gpd.GeoDataFrame(cells, crs=utm).to_crs("EPSG:4326")    return gpd.GeoDataFrame(cells, crs=utm).to_crs("EPSG:4326")
 
 
 def clip_to_poly(src, polygon):
@@ -177,14 +193,49 @@ def build_landsat_lst_composite(catalog, polygon, lst_tif: str, max_scenes: int 
 
 
 def fetch_fast_streets(top_geom) -> gpd.GeoDataFrame | None:
+    if top_geom is None or top_geom.is_empty:
+        return None
+
+    minx, miny, maxx, maxy = top_geom.buffer(0.0025).bounds
+    query = f"""
+    [out:json][timeout:25];
+    way["highway"~"primary|secondary|tertiary|residential|unclassified"]({miny},{minx},{maxy},{maxx});
+    out geom;
+    """
+    overpass_mirrors = [
+        "https://overpass-api.de/api/interpreter",
+        "https://overpass.kumi.systems/api/interpreter",
+        "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+    ]
+    headers = {"User-Agent": "IUA-Mexico-UNAM/1.0 (academic-urban-climate)"}
+
+    for endpoint in overpass_mirrors:
+        try:
+            resp = requests.post(endpoint, data={"data": query}, headers=headers, timeout=22)
+            if resp.status_code == 200:
+                elements = resp.json().get("elements", [])
+                rows = []
+                for el in elements:
+                    coords = [(pt["lon"], pt["lat"]) for pt in el.get("geometry", [])]
+                    if len(coords) >= 2:
+                        name = el.get("tags", {}).get("name", "Vialidad prioritaria")
+                        rows.append({"name": name, "geometry": LineString(coords)})
+                if rows:
+                    gdf_ov = gpd.GeoDataFrame(rows, crs="EPSG:4326")
+                    gdf_ov = gdf_ov[gdf_ov.intersects(top_geom.buffer(0.0008))].copy()
+                    if not gdf_ov.empty:
+                        return gdf_ov[["name", "geometry"]]
+        except Exception:
+            continue
+
     try:
         import osmnx as ox
         ox.settings.use_cache = True
-        ox.settings.timeout = 30
-        search_area = top_geom.buffer(0.003)
+        ox.settings.timeout = 25
+        search_area = top_geom.buffer(0.003).convex_hull
         G = ox.graph_from_polygon(search_area, network_type="all", simplify=True)
         edges = ox.graph_to_gdfs(G, nodes=False).reset_index()
-        edges = edges[edges.intersects(top_geom.buffer(0.0005))].copy()
+        edges = edges[edges.intersects(top_geom.buffer(0.0008))].copy()
         if not edges.empty:
             if "name" in edges.columns:
                 edges["name"] = edges["name"].apply(
@@ -196,49 +247,35 @@ def fetch_fast_streets(top_geom) -> gpd.GeoDataFrame | None:
     except Exception:
         pass
 
-    try:
-        minx, miny, maxx, maxy = top_geom.buffer(0.002).bounds
-        query = f"""
-        [out:json][timeout:25];
-        way["highway"~"primary|secondary|tertiary|residential"]({miny},{minx},{maxy},{maxx});
-        out geom;
-        """
-        resp = requests.post("https://overpass-api.de/api/interpreter", data={"data": query}, timeout=25)
-        if resp.status_code == 200:
-            elements = resp.json().get("elements", [])
-            rows = []
-            for el in elements:
-                coords = [(pt["lon"], pt["lat"]) for pt in el.get("geometry", [])]
-                if len(coords) >= 2:
-                    name = el.get("tags", {}).get("name", "Vialidad prioritaria")
-                    rows.append({"name": name, "geometry": LineString(coords)})
-            if rows:
-                gdf_ov = gpd.GeoDataFrame(rows, crs="EPSG:4326")
-                gdf_ov = gdf_ov[gdf_ov.intersects(top_geom.buffer(0.0005))].copy()
-                if not gdf_ov.empty:
-                    return gdf_ov[["name", "geometry"]]
-    except Exception:
-        pass
-
     return None
 
 
 def compute_marginacion(gdf_base: gpd.GeoDataFrame) -> np.ndarray:
     """
-    Carga el índice de marginación oficial de CONAPO por CVEGEO.
+    Carga el índice de marginación oficial de CONAPO por CVEGEO (.parquet, .csv.gz o .csv).
     Si no existe el insumo o no cruza, devuelve NaN (nunca sintetiza marginación a partir de variables biofísicas).
     """
     nan_arr = np.full(len(gdf_base), np.nan, dtype=float)
-    conapo_csv = "data/raw/sig/marginacion_conapo.csv"
-    if not os.path.exists(conapo_csv):
+    conapo_candidates = [
+        "data/raw/sig/marginacion_conapo.parquet",
+        "data/raw/sig/marginacion_conapo.csv.gz",
+        "data/raw/sig/marginacion_conapo.csv",
+    ]
+    conapo_file = next((p for p in conapo_candidates if os.path.exists(p)), None)
+    if conapo_file is None:
         return nan_arr
     try:
-        df_con = pd.read_csv(conapo_csv, dtype={"CVEGEO": str})
+        df_con = (
+            pd.read_parquet(conapo_file)
+            if conapo_file.endswith(".parquet")
+            else pd.read_csv(conapo_file, dtype={"CVEGEO": str})
+        )
         val_col = next((c for c in ["IMN_2020", "IM_2020", "IMN", "IM"] if c in df_con.columns), None)
-        if not val_col or "CVEGEO" not in df_con.columns:
+        cve_col = next((c for c in ["CVEGEO", "cvegeo", "CVE_AGEB"] if c in df_con.columns), None)
+        if not val_col or not cve_col:
             return nan_arr
-        m_map = dict(zip(df_con["CVEGEO"].str.strip(), pd.to_numeric(df_con[val_col], errors="coerce")))
-        raw_m = gdf_base["Clave_AGEB"].astype(str).map(m_map)
+        m_map = dict(zip(df_con[cve_col].astype(str).str.strip(), pd.to_numeric(df_con[val_col], errors="coerce")))
+        raw_m = gdf_base["Clave_AGEB"].astype(str).str.strip().map(m_map)
         if not raw_m.notna().any():
             return nan_arr
         m_norm = (
@@ -393,7 +430,7 @@ def compute_prioridad_sombra(
         except Exception:
             gdf_streets = None
     else:
-        gdf_streets = fetch_fast_streets(df.head(3).geometry.union_all())
+        gdf_streets = fetch_fast_streets(df.head(5).geometry.union_all())
         if gdf_streets is not None and not gdf_streets.empty:
             gdf_streets.to_file(streets_geojson, driver="GeoJSON")
 
