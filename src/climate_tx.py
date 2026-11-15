@@ -126,10 +126,11 @@ def fetch_cmip6_local(polygon) -> tuple[dict | None, dict]:
     """Carga proyecciones CMIP6 municipales preprocesadas con metadatos explícitos de unidades."""
     cmip_json = "data/raw/sig/cmip6_municipios.json"
     meta_default = {
-        "unidad": "temperatura_absoluta_C",  # WorldClim 2.1 CMIP6 bio/tmax (2041-2060)
+        "unidad": "anomalia_C",              # Anomalías térmicas WorldClim 2.1 CMIP6 (°C respecto a 1981-2010)
         "horizonte_anios": 55.0,             # Punto medio 2050 vs línea base 1981-2010 (1995)
         "modelos": ["ACCESS-CM2", "MPI-ESM1-2-HR", "MRI-ESM2-0"],
     }
+
     if not os.path.exists(cmip_json):
         return None, meta_default
     try:
