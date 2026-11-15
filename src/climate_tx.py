@@ -249,15 +249,17 @@ def generate_serie_tx_and_tpa(
             if vals:
                 q = 10 if "P10" in col_name else (90 if "P90" in col_name else 50)
                 raw_val = float(np.percentile(vals, q))
-
-                if unidad_cmip == "anomalia_C":
-                    delta_cmip = raw_val
-                else:
-                    delta_cmip = raw_val - ref_tmax_mean
-
-                delta_cmip = max(delta_cmip, 0.3)
                 q_scale = 0.85 if q == 10 else (1.18 if q == 90 else 1.0)
-                r_scen = (delta_cmip / horizonte_cmip) * q_scale
+
+                if raw_val < 10.0:
+                    delta_cmip = max(raw_val, 0.5)
+                    r_scen = (delta_cmip / horizonte_cmip) * q_scale
+                else:
+                    delta_raw = raw_val - ref_tmax_mean
+                    delta_min_fisico = r_base * mult_scen * horizonte_cmip
+                    delta_max_fisico = 0.085 * horizonte_cmip
+                    delta_cmip = float(np.clip(delta_raw, delta_min_fisico, delta_max_fisico))
+                    r_scen = (delta_cmip / horizonte_cmip) * q_scale
 
         r_scen = round(float(r_scen), 4)
         # Aceleración radiativa suave en SSP5-8.5 vs trayectoria estabilizada en SSP2-4.5
