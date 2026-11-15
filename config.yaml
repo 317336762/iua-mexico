@@ -1,0 +1,19 @@
+proyecto:
+  pais: "México"
+  anio_base: 2026
+  bbox_nacional: [33.0, -118.5, 14.0, -86.5]
+  plantilla_excel: "data/templates/IUA_plantilla_base.xlsx"
+
+clima:
+  periodo_referencia: [1981, 2010]
+  periodo_serie: [1950, 2100]
+  umbral_tx_default: 35.0
+  ventana_movil_tse: 20
+  modelos_cmip6: ["ACCESS-CM2", "MPI-ESM1-2-HR", "MRI-ESM2-0"]
+
+prioridad_sombra:
+  meta_copa_pct: 30.0
+  w_copa: 0.5
+  w_termico: 0.3
+  w_social: 0.2
+  copa_arbol_adulto_m2: 50.0
