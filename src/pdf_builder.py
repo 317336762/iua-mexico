@@ -248,7 +248,7 @@ def build_executive_pdf(
     if es_conservacion:
         diag_text = (
             f"El análisis geoespacial registra una cobertura arbórea promedio de <b>{copa_mun}%</b> sobre el límite municipal total "
-            f"y una Temperatura Superficial Terrestre (LST) estival mediana de <b>{lst_c} °C</b> (compuesto Landsat 8/9 {escenas_txt}con máscara QA_PIXEL), "
+            f"y una Temperatura Superficial Terrestre (LST) estival mediana de <b>{lst_c} °C</b> ({lst_origen_txt}), "
             f"valores propios de un régimen bioclimático templado sin isla de calor urbana crítica (la variabilidad térmica superficial observada "
             f"responde principalmente al gradiente altitudinal del municipio). Asimismo, la humedad térmica reciente{wbt_frag} se mantiene por debajo "
             f"del umbral operativo de estrés severo (28 °C), por lo que no se proyecta emergencia térmica urbana en el horizonte analizado."
@@ -256,7 +256,7 @@ def build_executive_pdf(
     elif es_no_aplica:
         diag_text = (
             f"El análisis geoespacial registra una cobertura arbórea promedio de <b>{copa_mun}%</b> sobre el límite municipal total "
-            f"y una Temperatura Superficial Terrestre (LST) estival mediana de <b>{lst_c} °C</b> (compuesto Landsat 8/9 {escenas_txt}con máscara QA_PIXEL). "
+            f"y una Temperatura Superficial Terrestre (LST) estival mediana de <b>{lst_c} °C</b> ({lst_origen_txt}). "
             f"A escala regional (ERA5 / CMIP6 SSP5-8.5 P50) no existe estrés térmico húmedo severo{wbt_frag}; sin embargo, se identifican "
             f"unidades urbanas densas con calentamiento superficial local y déficit de dosel que requieren arborización focalizada para mitigar "
             f"la carga radiante peatonal (incremento urbano estimado de hasta <b>+{delta_icu_aire} °C</b>; Voogt & Oke, 2003; Mildrexler et al., 2011)."
@@ -264,7 +264,7 @@ def build_executive_pdf(
     else:
         diag_text = (
             f"El análisis geoespacial registra una cobertura arbórea promedio de <b>{copa_mun}%</b> sobre el límite municipal total "
-            f"y una Temperatura Superficial Terrestre (LST) estival mediana de <b>{lst_c} °C</b> (compuesto Landsat 8/9 {escenas_txt}con máscara QA_PIXEL). "
+            f"y una Temperatura Superficial Terrestre (LST) estival mediana de <b>{lst_c} °C</b> ({lst_origen_txt}). "
             f"Bajo la línea base regional observada (Reanálisis ERA5 vía Open-Meteo 1950–2024 + anomalías CMIP6 SSP5-8.5 P50) y el umbral local "
             f"<b>{umbral_texto}</b>, el Tiempo sin Precedentes (<i>Climate Departure</i>) se proyecta en <b>TsE ~ {tse_disp}</b> (<b>TpA = {tpa_texto}</b>). "
             f"Como análisis de sensibilidad urbana, un incremento atmosférico estimado de <b>+{delta_icu_aire} °C</b> por Isla de Calor "
