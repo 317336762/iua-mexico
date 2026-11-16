@@ -13,6 +13,7 @@ from rasterstats import zonal_stats
 from shapely.geometry import LineString, box
 
 CACHE_DIR = "data/processed/cache_municipios"
+CACHE_VERSION = "v2.2"
 MIN_ESCENAS_LST = 3
 
 
@@ -41,7 +42,8 @@ def build_urban_grid_or_ageb(polygon) -> gpd.GeoDataFrame:
         else:
             gdf = gdf.to_crs("EPSG:4326")
 
-        gdf = gdf[gdf.intersects(polygon)].copy()
+        # Solo conservar AGEB cuyo punto interior pertenezca realmente al municipio
+        gdf = gdf[gdf.representative_point().within(polygon)].copy()
         if not gdf.empty:
             cve_col = next((c for c in ["CVEGEO", "CVE_AGEB", "cvegeo"] if c in gdf.columns), None)
             nom_col = next((c for c in ["NOM_LOC", "COLONIA", "NOM_MUN", "nom_loc"] if c in gdf.columns), None)
@@ -182,11 +184,45 @@ def build_landsat_lst_composite(catalog, polygon, lst_tif: str, max_scenes: int 
     return n_valid_scenes
 
 
+def estimate_urban_delta_icu(gdf_base: gpd.GeoDataFrame) -> float:
+    """
+    Estima ΔICU atmosférico separando unidades de baja copa (<20%) frente a áreas
+    arboladas de referencia (>=30%) y ponderando por la fracción urbanizada con déficit.
+    Evita inflar ΔICU por gradiente altitudinal en municipios serranos o rurales.
+    """
+    valid = gdf_base.dropna(subset=["LST_verano_C", "Copa_pct"]).copy()
+    if len(valid) < 2:
+        return 0.5
+
+    urb_baja_copa = valid[valid["Copa_pct"] < 20.0]
+    if urb_baja_copa.empty:
+        return 0.0
+
+    ref_arbolada = valid[valid["Copa_pct"] >= 30.0]
+    lst_urb = float(urb_baja_copa["LST_verano_C"].median())
+    lst_ref = (
+        float(ref_arbolada["LST_verano_C"].median())
+        if not ref_arbolada.empty
+        else float(np.percentile(valid["LST_verano_C"], 25))
+    )
+
+    contraste_lst = max(0.0, lst_urb - lst_ref)
+    if "Area_ha" in valid.columns and valid["Area_ha"].sum() > 0:
+        frac_urb_deficit = float(urb_baja_copa["Area_ha"].sum() / valid["Area_ha"].sum())
+    else:
+        frac_urb_deficit = float(len(urb_baja_copa) / len(valid))
+
+    # Factor de escala urbano: municipios con >35% de superficie en baja copa alcanzan escala completa
+    factor_escala_urbana = float(np.clip(frac_urb_deficit / 0.35, 0.25, 1.0))
+    delta_icu = contraste_lst * 0.45 * factor_escala_urbana
+    return round(float(np.clip(delta_icu, 0.0, 2.2)), 2)
+
+
 def fetch_fast_streets(top_geom) -> gpd.GeoDataFrame | None:
     if top_geom is None or top_geom.is_empty:
         return None
 
-    minx, miny, maxx, maxy = top_geom.buffer(0.0025).bounds
+    minx, miny, maxx, maxy = top_geom.buffer(0.0015).bounds
     query = f"""
     [out:json][timeout:25];
     way["highway"~"primary|secondary|tertiary|residential|unclassified"]({miny},{minx},{maxy},{maxx});
@@ -212,7 +248,7 @@ def fetch_fast_streets(top_geom) -> gpd.GeoDataFrame | None:
                         rows.append({"name": name, "geometry": LineString(coords)})
                 if rows:
                     gdf_ov = gpd.GeoDataFrame(rows, crs="EPSG:4326")
-                    gdf_ov = gdf_ov[gdf_ov.intersects(top_geom.buffer(0.0008))].copy()
+                    gdf_ov = gdf_ov[gdf_ov.intersects(top_geom)].copy()
                     if not gdf_ov.empty:
                         return gdf_ov[["name", "geometry"]]
         except Exception:
@@ -222,10 +258,10 @@ def fetch_fast_streets(top_geom) -> gpd.GeoDataFrame | None:
         import osmnx as ox
         ox.settings.use_cache = True
         ox.settings.timeout = 25
-        search_area = top_geom.buffer(0.003).convex_hull
+        search_area = top_geom.buffer(0.002).convex_hull
         G = ox.graph_from_polygon(search_area, network_type="all", simplify=True)
         edges = ox.graph_to_gdfs(G, nodes=False).reset_index()
-        edges = edges[edges.intersects(top_geom.buffer(0.0008))].copy()
+        edges = edges[edges.intersects(top_geom)].copy()
         if not edges.empty:
             if "name" in edges.columns:
                 edges["name"] = edges["name"].apply(
@@ -296,11 +332,11 @@ def compute_prioridad_sombra(
         with open(meta_json, "r", encoding="utf-8") as f:
             summary = json.load(f)
 
-        # Invalidar caché si fue generado con malla sintética (U-0001) y ya existe ageb.parquet oficial
-        if ageb_parquet_exists and not gdf_base.empty and str(gdf_base["Clave_AGEB"].iloc[0]).startswith("U-"):
+        if summary.get("cache_version") != CACHE_VERSION:
             usar_cache = False
-        # Invalidar si existe lst_verano.tif sin conteo real de escenas registrado
-        elif os.path.exists(lst_tif) and "lst_escenas_compuesto" not in summary:
+        elif ageb_parquet_exists and not gdf_base.empty and str(gdf_base["Clave_AGEB"].iloc[0]).startswith("U-"):
+            usar_cache = False
+        elif not gdf_base.empty and not gdf_base.representative_point().within(polygon).all():
             usar_cache = False
         else:
             if ("Marginacion_idx" not in gdf_base.columns) or gdf_base["Marginacion_idx"].isna().all():
@@ -310,8 +346,12 @@ def compute_prioridad_sombra(
                     gdf_base.to_file(base_geojson, driver="GeoJSON")
             n_esc_cached = int(summary.get("lst_escenas_compuesto", 0))
             summary["lst_real"] = bool(os.path.exists(lst_tif) and n_esc_cached >= MIN_ESCENAS_LST)
+            summary["delta_icu_aire_c"] = estimate_urban_delta_icu(gdf_base)
 
     if not usar_cache:
+        if os.path.exists(streets_geojson):
+            os.remove(streets_geojson)
+
         gdf_units = build_urban_grid_or_ageb(polygon)
         bbox = list(polygon.bounds)
         wc_real = False
@@ -373,13 +413,10 @@ def compute_prioridad_sombra(
         gdf_base["Marginacion_idx"] = compute_marginacion(gdf_base)
         gdf_base.to_file(base_geojson, driver="GeoJSON")
 
-        valid_lst = pd.Series(lst_vals).dropna()
-        if len(valid_lst) >= 4:
-            delta_icu_aire = round(float(np.clip((np.percentile(valid_lst, 90) - np.percentile(valid_lst, 25)) * 0.45, 1.2, 2.2)), 2)
-        else:
-            delta_icu_aire = 1.5
+        delta_icu_aire = estimate_urban_delta_icu(gdf_base)
 
         summary = {
+            "cache_version": CACHE_VERSION,
             "delta_icu_aire_c": delta_icu_aire,
             "altura_edificios_m": 6.5,
             "wc_real": wc_real,
@@ -431,14 +468,16 @@ def compute_prioridad_sombra(
     summary["brecha_total_ha"] = round(float(df["Brecha_copa_ha"].sum()), 2)
     summary["arboles_totales"] = int(df["Arboles_equivalentes"].sum())
 
+    # Consultar vialidades ÚNICAMENTE en las unidades con déficit arbóreo real
     gdf_streets = None
+    df_deficit = df[df["Arboles_equivalentes"] > 0]
     if os.path.exists(streets_geojson):
         try:
             gdf_streets = gpd.read_file(streets_geojson)
         except Exception:
             gdf_streets = None
-    else:
-        gdf_streets = fetch_fast_streets(df.head(5).geometry.union_all())
+    elif not df_deficit.empty:
+        gdf_streets = fetch_fast_streets(df_deficit.head(5).geometry.union_all())
         if gdf_streets is not None and not gdf_streets.empty:
             gdf_streets.to_file(streets_geojson, driver="GeoJSON")
 

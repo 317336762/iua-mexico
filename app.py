@@ -756,13 +756,18 @@ if "res" in st.session_state:
             ),
         ).add_to(m)
 
-        if (not es_conservacion) and gdf_streets is not None and not gdf_streets.empty:
-            folium.GeoJson(
-                gdf_streets,
-                name="Vialidades críticas (llegan primero a TsE)",
-                style_function=lambda _: {"color": "#67000d", "weight": 2.8, "opacity": 0.9},
-                tooltip=folium.GeoJsonTooltip(fields=["name"], aliases=["Calle prioritaria:"]),
-            ).add_to(m)
+        df_ageb_deficit = gdf_ageb_eval[gdf_ageb_eval["Arboles_equivalentes"] > 0]
+        if (not es_conservacion) and (not df_ageb_deficit.empty) and gdf_streets is not None and not gdf_streets.empty:
+            zona_deficit = df_ageb_deficit.geometry.union_all()
+            gdf_streets_activas = gpd.clip(gdf_streets, zona_deficit)
+            gdf_streets_activas = gdf_streets_activas[~gdf_streets_activas.is_empty]
+            if not gdf_streets_activas.empty:
+                folium.GeoJson(
+                    gdf_streets_activas,
+                    name="Vialidades críticas (llegan primero a TsE)",
+                    style_function=lambda _: {"color": "#67000d", "weight": 2.8, "opacity": 0.9},
+                    tooltip=folium.GeoJsonTooltip(fields=["name"], aliases=["Calle prioritaria:"]),
+                ).add_to(m)
 
         folium.LayerControl().add_to(m)
         st_folium(m, width=1100, height=520, returned_objects=[], key=f"map_{res['estado']}_{res['mun']}")
