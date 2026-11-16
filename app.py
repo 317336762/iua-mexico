@@ -569,7 +569,7 @@ if "res" in st.session_state:
     es_conservacion = False
 
     if wbt_max_rec < 26.5 and "LST_verano_C" in gdf_ageb_eval.columns:
-        lst_s = gdf_ageb_eval["LST_verano_C"].fillna(26.0)
+        lst_s = gdf_ageb_eval["LST_verano_C"].fillna(36.0)
         copa_s = gdf_ageb_eval["Copa_pct"].fillna(cobertura_mun)
 
         sin_estres_ageb = (lst_s < 30.0) & ~((lst_s >= 28.0) & (copa_s < res["meta_copa"]))

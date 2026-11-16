@@ -153,7 +153,11 @@ def build_executive_pdf(
         kpi_tpa_corto = f"{tse_disp} ({float(tpa_val):.1f} años)"
 
     umbral_texto = f">{umbral_c} °C (TX95p)" if umbral_c is not None else "Percentil 95 local (TX95p)"
-    escenas_txt = f"de {n_escenas_lst} escenas " if n_escenas_lst > 0 else ""
+    lst_origen_txt = (
+        f"compuesto Landsat 8/9 de {n_escenas_lst} escena{'s' if n_escenas_lst > 1 else ''} con máscara QA_PIXEL"
+        if n_escenas_lst > 0
+        else "sin dato satelital LST verificado"
+    )
 
     # 1. Encabezado institucional
     story.append(Paragraph("FICHA EJECUTIVA MUNICIPAL — CLIMA Y ADAPTACIÓN URBANA", title_style))

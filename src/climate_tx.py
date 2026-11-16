@@ -139,10 +139,10 @@ def extract_historical_tx_series(
 
 
 def fetch_cmip6_local(polygon) -> tuple[dict | None, dict]:
-    """Carga proyecciones CMIP6 municipales preprocesadas con metadatos explícitos de unidades."""
+    """Carga proyecciones CMIP6 municipales preprocesadas con verificación física de unidades."""
     cmip_json = "data/raw/sig/cmip6_municipios.json"
     meta_default = {
-        "unidad": "anomalia_C",
+        "unidad": "tx_proj_c",
         "horizonte_anios": 55.0,
         "modelos": ["ACCESS-CM2", "MPI-ESM1-2-HR", "MRI-ESM2-0"],
     }
@@ -155,9 +155,23 @@ def fetch_cmip6_local(polygon) -> tuple[dict | None, dict]:
         key = f"{gdf.loc[idx, 'ESTADO']}_{gdf.loc[idx, 'MUNICIPIO']}"
         with open(cmip_json, "r", encoding="utf-8") as f:
             data = json.load(f)
-        meta = data.get("_meta", meta_default)
-        return data.get(key), meta
-    except Exception:
+        record = data.get(key)
+        meta = {**meta_default, **data["_meta"]} if isinstance(data.get("_meta"), dict) else meta_default.copy()
+
+        # Verificar consistencia física real del registro (WorldClim 2.1 entrega °C absolutos ~15-45 °C)
+        if isinstance(record, dict):
+            sample_vals = [
+                float(v) for k, v in record.items()
+                if k.startswith(("ssp245_", "ssp585_")) and v is not None
+            ]
+            if sample_vals:
+                if max(sample_vals) > 12.0:
+                    meta["unidad"] = "tx_proj_c"
+                elif max(sample_vals) < 10.0:
+                    meta["unidad"] = "anomalia_C"
+        return record, meta
+    except Exception as exc:
+        warnings.warn(f"Fallo al leer proyecciones CMIP6 locales ({cmip_json}): {exc}", RuntimeWarning)
         return None, meta_default
 
 
