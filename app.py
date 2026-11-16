@@ -444,7 +444,7 @@ if st.button("Diagnóstico Municipal", type="primary"):
                 "modo_demo": bool(modo_demo),
             }
         except (RuntimeError, ValueError) as err:
-        st.session_state.pop("res", None)
+            st.session_state.pop("res", None)
         st.error(f"BLOQUEO POR GOBERNANZA DE DATOS (Modo Estricto): {err}")
 
 if "res" in st.session_state:
