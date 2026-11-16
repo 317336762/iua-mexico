@@ -15,15 +15,6 @@ from src.pdf_builder import build_executive_pdf
 
 st.set_page_config(page_title="IUA México", layout="wide")
 
-
-@st.cache_data
-def cargar_datos_municipales():
-    ruta_parquet = "data/processed/iua_resumen_municipal.parquet"
-    return gpd.read_parquet(ruta_parquet)
-
-
-gdf_municipios = cargar_datos_municipales()
-
 plt.rcParams["font.sans-serif"] = ["Plus Jakarta Sans", "DejaVu Sans", "Arial"]
 plt.rcParams["axes.edgecolor"] = "#CBD5E1"
 plt.rcParams["axes.linewidth"] = 0.8
@@ -223,7 +214,7 @@ def get_municipal_defaults(estado: str, area_km2: float) -> dict:
     if est_norm in norte_arido:
         return {"meta_copa": 20, "tau_arb": 9.5, "tau_cor": round(10.0 + factor_escala, 1), "tau_ban": round(6.0 + factor_escala * 0.5, 1)}
     elif est_norm in sur_humedo:
-        return {"meta_copa": 35, "tau_arb": 7.0, "tau_cor": round(9.0 + factor_escala, 1), "tau_ban": round(5.5 + factor_escala * 0.5, 1)}
+        return {"meta_copa": 30, "tau_arb": 7.0, "tau_cor": round(9.0 + factor_escala, 1), "tau_ban": round(5.5 + factor_escala * 0.5, 1)}
     else:
         return {"meta_copa": 28, "tau_arb": 8.5, "tau_cor": round(9.5 + factor_escala, 1), "tau_ban": round(6.0 + factor_escala * 0.5, 1)}
 
@@ -242,7 +233,7 @@ def compute_theil_sen_trend(x: np.ndarray, y: np.ndarray):
     return slope, intercept
 
 
-def plot_ipcc_plume(df_tx: pd.DataFrame, limite_dias: float, tse_reg: float, umbral_c: float, municipio: str):
+def plot_ipcc_plume(df_tx: pd.DataFrame, limite_dias: float, tse_reg, umbral_c: float, municipio: str):
     fig, ax = plt.subplots(figsize=(10.5, 4.3), dpi=150)
     fig.patch.set_facecolor("#FFFFFF")
     ax.set_facecolor("#FFFFFF")
@@ -264,12 +255,19 @@ def plot_ipcc_plume(df_tx: pd.DataFrame, limite_dias: float, tse_reg: float, umb
 
     ax.axhline(limite_dias, color="#9B2C2C", linestyle=":", linewidth=1.6, label=f"Máximo referencia 1981–2010 ({limite_dias:.0f} días/año)")
 
-    if pd.notna(tse_reg) and 2026 <= float(tse_reg) <= 2100:
-        ax.axvline(float(tse_reg), color="#9B2C2C", linestyle="-.", linewidth=1.4, alpha=0.85)
+    tse_num = None
+    if tse_reg is not None and pd.notna(tse_reg):
+        try:
+            tse_num = float(tse_reg)
+        except (TypeError, ValueError):
+            tse_num = None
+
+    if tse_num is not None and 2026 <= tse_num <= 2100:
+        ax.axvline(tse_num, color="#9B2C2C", linestyle="-.", linewidth=1.4, alpha=0.85)
         ax.text(
-            float(tse_reg) + 1.5,
+            tse_num + 1.5,
             limite_dias + 22,
-            f"TsE Regional\n(≈ {int(round(tse_reg))})",
+            f"TsE Regional\n(≈ {int(round(tse_num))})",
             color="#9B2C2C",
             fontsize=9.0,
             fontweight="bold",
@@ -279,6 +277,7 @@ def plot_ipcc_plume(df_tx: pd.DataFrame, limite_dias: float, tse_reg: float, umb
     ax.set_title(f"Proyección Emulada de Días con Temperatura Máxima > {umbral_c} °C — {municipio}", fontsize=12.5, fontweight="bold", color="#0B3C49", pad=14, loc="left")
     ax.set_xlabel("Año (1950–2100)", fontsize=10.5, fontweight="bold", color="#1E293B", labelpad=8)
     ax.set_ylabel("Frecuencia anual (días / año)", fontsize=10.5, fontweight="bold", color="#1E293B", labelpad=8)
+    ax.set_ylim(bottom=0)
     ax.grid(True, linestyle="--", linewidth=0.5, color="#E2E8F0", alpha=0.9)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -316,6 +315,7 @@ def plot_climate_index_bars(df_hist: pd.DataFrame, col_name: str, titulo: str, y
     ax.set_title(titulo, fontsize=11.5, fontweight="bold", color="#0B3C49", pad=12, loc="left")
     ax.set_xlabel("Año (1950–2024)", fontsize=10, fontweight="bold", color="#1E293B", labelpad=6)
     ax.set_ylabel(ylabel, fontsize=10, fontweight="bold", color="#1E293B", labelpad=6)
+    ax.set_ylim(bottom=0)
     ax.grid(True, axis="y", linestyle="--", linewidth=0.5, color="#E2E8F0")
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -385,14 +385,12 @@ with st.sidebar.expander("Gobernanza de Datos", expanded=False):
         help="En modo estricto (apagado), el sistema bloquea la emisión de reportes si falta algún insumo real. Active este modo solo para demostraciones con cifras ilustrativas.",
     )
 
-# --- PEGA ESTO AQUÍ (Pie de barra lateral) ---
 st.sidebar.markdown("---")
 st.sidebar.caption(
     "**Autoría y Soporte Técnico**  \n"
     "Baruc Martínez Velasco  \n"
     "**Contacto:** `martinezbaruc13@gmail.com`"
 )
-# -------------------------------------------
 
 st.title("Índice de Urgencia Adaptativa en México")
 st.caption("Diagnóstico municipal de calor extremo, prioridad de arborización, estrés térmico húmedo e infraestructura azul-verde")
@@ -448,28 +446,25 @@ if st.button("Diagnóstico Municipal", type="primary"):
 
 if "res" in st.session_state:
     res = st.session_state["res"]
-    gdf_ageb = res["gdf_ageb"]
+    gdf_ageb_eval = res["gdf_ageb"].copy()
     gdf_streets = res["gdf_streets"]
-    micro = res["micro"]
+    micro_eval = dict(res["micro"])
     df_hist = res["df_hist"]
     df_tx = res["df_tx"]
     df_tpa = res["df_tpa"]
     tau_arb, tau_cor, tau_ban = res["taus"]
 
-    # Verificación integral de trazabilidad de insumos reales
     respaldos = []
-    if not micro.get("wc_real", True):
+    if not micro_eval.get("wc_real", True):
         respaldos.append("Cobertura arbórea (WorldCover)")
-    if not micro.get("lst_real", True):
+    if not micro_eval.get("lst_real", True):
         respaldos.append("Temperatura superficial (Landsat)")
     if not res["flags"].get("era5_real", True):
         respaldos.append("Clima histórico (ERA5 / Open-Meteo)")
     if not res.get("cmip6_real", True):
         respaldos.append("Proyecciones (CMIP6)")
 
-    sin_conapo = "Marginacion_idx" in gdf_ageb.columns and gdf_ageb["Marginacion_idx"].isna().all()
-    #if sin_conapo:
-        #respaldos.append("Marginación social (CONAPO no disponible; IPS biofísico no comparable entre municipios)")
+    sin_conapo = ("Marginacion_idx" not in gdf_ageb_eval.columns) or gdf_ageb_eval["Marginacion_idx"].isna().all()
 
     en_demo = res.get("modo_demo", False) or modo_demo
     bloquear_pdf = bool(respaldos) and not en_demo
@@ -487,7 +482,6 @@ if "res" in st.session_state:
 
     med_ssp5 = df_tpa[(df_tpa["Escenario"] == "SSP5-8.5") & (df_tpa["Percentil"].str.contains("P50"))].iloc[0]
 
-    # Jerarquía científica: Línea base regional (ERA5 observado) como primaria; ajuste ΔICU como sensibilidad urbana
     tpa_reg = med_ssp5["TpA_anios"]
     tse_reg = med_ssp5["TSE_regional"]
     tpa_icu = med_ssp5["TpA_con_ICU"]
@@ -506,7 +500,6 @@ if "res" in st.session_state:
     horizonte_max_cota = max(2100 - anio_base_cfg, 1)
     iua_cota_2100 = round(tau_arb / float(horizonte_max_cota), 2)
 
-    # Clasificación unificada (distinguiendo explícitamente >2100 vs Rebasado)
     if pd.isna(tpa_reg) or ">2100" in str(horizonte_med):
         nivel_urgencia = "Baja (>2100)"
         iua_label = f"< {iua_cota_2100:.2f} (>2100)"
@@ -515,7 +508,7 @@ if "res" in st.session_state:
         texto_urgencia = (
             f"<b>HORIZONTE POSTERIOR A 2100 (IUA < {iua_cota_2100:.2f}):</b> Bajo la mediana SSP5-8.5 regional, la media móvil de 20 años no rebasa "
             f"el máximo histórico de referencia dentro del siglo XXI (<b>TsE > 2100</b>). Con ajuste urbano estimado por Isla de Calor "
-            f"(<b>+ΔICU ≈ {micro['delta_icu_aire_c']} °C</b>), el horizonte de sensibilidad se ubica en <b>{int(tse_icu) if pd.notna(tse_icu) else '>2100'}</b>."
+            f"(<b>+ΔICU ≈ {micro_eval['delta_icu_aire_c']} °C</b>), el horizonte de sensibilidad se ubica en <b>{int(tse_icu) if pd.notna(tse_icu) else '>2100'}</b>."
         )
     elif float(tpa_reg) <= 0:
         nivel_urgencia = "REBASADO"
@@ -553,23 +546,59 @@ if "res" in st.session_state:
                 f"<b>TsE ≈ {tse_reg_txt}</b> (sensibilidad urbana con ΔICU: <b>TsE {tse_icu_txt}</b>), margen suficiente para ejecutar el plan de arborización (<b>τ = {tau_arb} años</b>)."
             )
 
+    tse_reg_plot = tse_reg
+    tse_reg_pdf = tse_reg if pd.notna(tse_reg) else ">2100"
+    iua_pdf_str = f"{iua_label} — Urgencia {nivel_urgencia}"
+
+    # === FILTRO DE VALIDACIÓN RURAL / CLIMA TEMPLADO ===
+    ult_10_pdf = df_hist[df_hist["Anio"] >= 2015]
+    wbt_max_rec = float(ult_10_pdf["WBT_max_anual"].max()) if not ult_10_pdf.empty else 25.0
+    lst_mediana_mun = (
+        float(gdf_ageb_eval["LST_verano_C"].median())
+        if "LST_verano_C" in gdf_ageb_eval.columns and not gdf_ageb_eval["LST_verano_C"].isna().all()
+        else float(micro_eval.get("lst_media_c", 35.0))
+    )
+    cobertura_mun = float(micro_eval.get("copa_media_pct", 0.0))
+    es_zona_templada = (lst_mediana_mun < 30.0) and (wbt_max_rec < 26.5)
+
+    if es_zona_templada:
+        nivel_urgencia = "Conservación (Clima templado)"
+        iua_label = "0.00 (No aplica)"
+        iua_pdf_str = "0.00 — Conservación (Sin estrés térmico crítico)"
+        tse_reg_txt = "No aplica"
+        tpa_reg_txt = "Clima Templado"
+        tse_icu = None
+        tpa_reg = None
+        tse_reg_plot = None
+        tse_reg_pdf = "No aplica"
+        micro_eval["arboles_totales"] = 0
+        micro_eval["brecha_total_ha"] = 0.0
+        gdf_ageb_eval["Prioridad"] = "Conservación (Clima templado)"
+        gdf_ageb_eval["Arboles_equivalentes"] = 0
+        gdf_ageb_eval["Brecha_copa_ha"] = 0.0
+        texto_urgencia = (
+            f"<b>ZONA DE CONSERVACIÓN / CLIMA TEMPLADO:</b> El municipio registra una temperatura superficial estival mediana de "
+            f"<b>{lst_mediana_mun:.1f} °C</b>, bulbo húmedo máximo reciente de <b>{wbt_max_rec:.1f} °C</b> (por debajo del umbral térmico urbano) "
+            f"y una cobertura arbórea del <b>{cobertura_mun:.1f}%</b>. No presenta isla de calor severa ni déficit crítico de dosel; "
+            f"la estrategia prioritaria es la <b>conservación ambiental y manejo forestal sustentable</b>."
+        )
+
     st.subheader(f"Semáforo de Urgencia — {res['mun']}, {res['estado']}")
     st.markdown(f'<div class="banner-urgencia">{texto_urgencia}</div>', unsafe_allow_html=True)
 
-    b1 = "Cobertura Arbórea: ESA WorldCover 10m" if micro["wc_real"] else "Cobertura Arbórea: Sin dato real"
-    b2 = "Calor Superficial: Landsat 8/9" if micro["lst_real"] else "Calor Superficial: Sin dato real"
+    b1 = "Cobertura Arbórea: ESA WorldCover 10m" if micro_eval["wc_real"] else "Cobertura Arbórea: Sin dato real"
+    b2 = "Calor Superficial: Landsat 8/9" if micro_eval["lst_real"] else "Calor Superficial: Sin dato real"
     b3 = "Clima 1950–2024: Reanálisis ERA5 (Open-Meteo)" if res["flags"]["era5_real"] else "Clima: Respaldo Demo"
     b4 = "Proyección: Emulación anclada a CMIP6 (WorldClim 2.1)" if res["cmip6_real"] else "Proyección: Escalamiento Demo"
-    b5 = "Red Vial: OpenStreetMap" if micro["calles_real"] else "Red Vial: No disponible"
+    b5 = "Red Vial: OpenStreetMap" if micro_eval["calles_real"] else "Red Vial: No disponible"
     st.caption(f"Fuentes:  {b1}  |  {b2}  |  {b3}  |  {b4}  |  {b5}  |  Umbral aplicado: **>{res['umbral']} °C**")
 
-    ult_10_pdf = df_hist[df_hist["Anio"] >= 2015]
     pdf_bytes = build_executive_pdf(
         municipio_nombre=f"{res['mun']}, {res['estado']}",
-        resumen=micro,
+        resumen=micro_eval,
         tpa_val=tpa_reg if pd.notna(tpa_reg) else None,
-        tse_val=tse_reg if pd.notna(tse_reg) else ">2100",
-        iua_val=f"{iua_label} — Urgencia {nivel_urgencia}",
+        tse_val=tse_reg_pdf,
+        iua_val=iua_pdf_str,
         umbral_c=res["umbral"],
         meta_copa=res["meta_copa"],
         tau_arb=tau_arb,
@@ -578,6 +607,7 @@ if "res" in st.session_state:
         dias_wbt28=float(ult_10_pdf["Dias_WBT28"].mean()) if not ult_10_pdf.empty else None,
         p99_lluvia=float(res["flags"]["p99_lluvia_mm"]),
         respaldo_activo=bool(respaldos) or en_demo,
+        es_conservacion=es_zona_templada,
     )
 
     st.download_button(
@@ -594,11 +624,18 @@ if "res" in st.session_state:
     c_acc1, c_acc2, c_acc3 = st.columns(3)
 
     with c_acc1:
-        st.markdown(f"""
-            <div class="card-petroleo">
-                <b>Infraestructura Verde:</b> Plantación de <b>{micro['arboles_totales']:,} árboles nativos</b> en las AGEB urbanas que actualmente están por debajo de la meta del <b>{res['meta_copa']}%</b> de copa.
-            </div>
-        """, unsafe_allow_html=True)
+        if es_zona_templada:
+            st.markdown("""
+                <div class="card-petroleo">
+                    <b>Conservación de Dosel:</b> Mantener la cobertura vegetal existente y proteger corredores ribereños y forestales sin requerir plantación urbana masiva.
+                </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown(f"""
+                <div class="card-petroleo">
+                    <b>Infraestructura Verde:</b> Plantación de <b>{micro_eval['arboles_totales']:,} árboles nativos</b> en las AGEB urbanas que actualmente están por debajo de la meta del <b>{res['meta_copa']}%</b> de copa.
+                </div>
+            """, unsafe_allow_html=True)
 
     with c_acc2:
         st.markdown("""
@@ -615,17 +652,17 @@ if "res" in st.session_state:
         """, unsafe_allow_html=True)
 
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Copa total municipal*", f"{micro['copa_media_pct']}%", help="Promedio sobre todo el polígono municipal (incluye áreas naturales/serranas).")
+    c1.metric("Copa total municipal*", f"{micro_eval['copa_media_pct']}%", help="Promedio sobre todo el polígono municipal (incluye áreas naturales/serranas).")
     c2.metric("TsE Regional (ERA5/CMIP6)", tse_reg_txt, help="Línea base primaria sin ajuste empírico de isla de calor (SSP5-8.5 P50).")
     c3.metric("TpA Regional disponible", tpa_reg_txt, help="Ventana de adaptación regional antes de TsE.")
     c4.metric(
         "Sensibilidad urbana (+ΔICU)",
-        f"{int(round(tse_icu))}" if pd.notna(tse_icu) else ">2100",
-        delta=f"+{micro['delta_icu_aire_c']} °C estimado",
+        f"{int(round(tse_icu))}" if pd.notna(tse_icu) else ("No aplica" if es_zona_templada else ">2100"),
+        delta=f"+{micro_eval['delta_icu_aire_c']} °C estimado",
         delta_color="inverse",
         help="Escenario de sensibilidad aplicando ΔICU aire estimado desde LST (Voogt & Oke, 2003; Mildrexler et al., 2011).",
     )
-    c5.metric("Déficit arbóreo (AGEB)", f"{micro['arboles_totales']:,}", help="Suma exclusiva de unidades urbanas por debajo de la meta de copa.")
+    c5.metric("Déficit arbóreo (AGEB)", f"{micro_eval['arboles_totales']:,}", help="Suma exclusiva de unidades urbanas por debajo de la meta de copa.")
 
     renombre_ageb = {
         "Clave_AGEB": "Clave AGEB",
@@ -638,10 +675,10 @@ if "res" in st.session_state:
     }
 
     if busqueda_colonia:
-        filtradas = gdf_ageb[
-            gdf_ageb["Colonia_Ref"].str.contains(busqueda_colonia, case=False, na=False) |
-            gdf_ageb["Clave_AGEB"].str.contains(busqueda_colonia, case=False, na=False)
-        ]
+        mask_busq = gdf_ageb_eval["Clave_AGEB"].astype(str).str.contains(busqueda_colonia, case=False, na=False, regex=False)
+        if "Colonia_Ref" in gdf_ageb_eval.columns:
+            mask_busq = mask_busq | gdf_ageb_eval["Colonia_Ref"].astype(str).str.contains(busqueda_colonia, case=False, na=False, regex=False)
+        filtradas = gdf_ageb_eval[mask_busq]
         if not filtradas.empty:
             st.success(f"Coincidencia encontrada: se localizaron {len(filtradas)} unidades urbanas.")
             cols_busq = [c for c in renombre_ageb.keys() if c in filtradas.columns]
@@ -673,7 +710,7 @@ if "res" in st.session_state:
             return {"fillColor": "#fee08b", "color": "#bdbdbd", "weight": 0.6, "fillOpacity": 0.25}
 
         folium.GeoJson(
-            gdf_ageb[["Clave_AGEB", "Prioridad", "IPS", "Copa_pct", "LST_verano_C", "Arboles_equivalentes", "geometry"]],
+            gdf_ageb_eval[["Clave_AGEB", "Prioridad", "IPS", "Copa_pct", "LST_verano_C", "Arboles_equivalentes", "geometry"]],
             name="Prioridad de Arborización",
             style_function=style_ageb,
             tooltip=folium.GeoJsonTooltip(
@@ -691,14 +728,17 @@ if "res" in st.session_state:
             ).add_to(m)
 
         folium.LayerControl().add_to(m)
-        st_folium(m, width=1100, height=520, returned_objects=[])
+        st_folium(m, width=1100, height=520, returned_objects=[], key=f"map_{res['estado']}_{res['mun']}")
         st.caption("Escala gráfica en esquina inferior izquierda. Líneas en rojo oscuro: vialidades dentro de las unidades con mayor déficit de sombra y calor superficial.")
 
     with tab2:
         st.markdown(f"**Trayectoria histórica (1950–2024) y proyecciones emuladas ancladas a CMIP6 (Umbral > {res['umbral']} °C | Máximo referencia 1981–2010 = {res['limite']} días/año)**")
-        fig_plume = plot_ipcc_plume(df_tx, res["limite"], tse_reg, res["umbral"], f"{res['mun']}, {res['estado']}")
+        fig_plume = plot_ipcc_plume(df_tx, res["limite"], tse_reg_plot, res["umbral"], f"{res['mun']}, {res['estado']}")
         st.pyplot(fig_plume, use_container_width=True)
         plt.close(fig_plume)
+
+        if es_zona_templada:
+            st.info("Nota bioclimática: En municipios templados o tropicales de baja variabilidad interanual, el umbral estadístico de emergencia (TsE) puede superarse temprano sin implicar peligro térmico absoluto (LST < 30 °C y WBT < 26.5 °C).")
 
         st.markdown("**Resumen por escenario climático y horizonte temporal (Línea base regional + Sensibilidad urbana ΔICU)**")
         df_tpa_view = df_tpa.copy()
@@ -765,22 +805,22 @@ if "res" in st.session_state:
 
     with tab4:
         st.markdown("**Desglose por Unidad Geoestadística Básica (AGEB) — Primeras 30 unidades priorizadas**")
-        cols_tabla = [c for c in renombre_ageb.keys() if c in gdf_ageb.columns]
+        cols_tabla = [c for c in renombre_ageb.keys() if c in gdf_ageb_eval.columns]
         st.dataframe(
-            gdf_ageb[cols_tabla].head(30).rename(columns=renombre_ageb),
+            gdf_ageb_eval[cols_tabla].head(30).rename(columns=renombre_ageb),
             use_container_width=True,
             hide_index=True,
         )
         excel_bytes = build_excel_report(
             municipio_nombre=f"{res['mun']}, {res['estado']}",
-            df_ageb=gdf_ageb.drop(columns=["geometry"]),
+            df_ageb=gdf_ageb_eval.drop(columns=["geometry"]),
             df_tx=df_tx,
             df_tpa=df_tpa,
             limite_dias=res["limite"],
             tau_vals=(tau_arb, tau_cor, tau_ban),
             cfg=cfg,
             umbral_c=res["umbral"],
-            micro=micro,
+            micro=micro_eval,
         )
         st.download_button(
             label="Descargar Libro Excel Completo (.xlsx)",

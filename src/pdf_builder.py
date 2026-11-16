@@ -32,6 +32,7 @@ def build_executive_pdf(
     dias_wbt28: float | None = None,
     p99_lluvia: float | None = None,
     respaldo_activo: bool = False,
+    es_conservacion: bool = False,
 ) -> bytes:
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -128,11 +129,15 @@ def build_executive_pdf(
     brecha_ha = round(float(resumen.get("brecha_total_ha", 0)), 1)
     conapo_real = resumen.get("conapo_real", True)
 
-    es_post_2100 = str(tse_val).strip() == ">2100" or (tpa_val is None and str(tse_val).strip() == ">2100")
-    tpa_rebasado = (not es_post_2100) and (tpa_val is None or float(tpa_val) <= 0)
+    es_post_2100 = str(tse_val).strip() == ">2100"
+    tpa_rebasado = (not es_conservacion) and (not es_post_2100) and (tpa_val is None or float(tpa_val) <= 0)
     horizonte_max = max(2100 - int(anio_base), 1)
 
-    if es_post_2100:
+    if es_conservacion:
+        tse_disp = "No aplica"
+        tpa_texto = "No aplica (Clima templado)"
+        kpi_tpa_corto = "No aplica (Templado)"
+    elif es_post_2100:
         tse_disp = ">2100"
         tpa_texto = f">{horizonte_max} años (posterior a 2100)"
         kpi_tpa_corto = f">2100 (>{horizonte_max} a)"
@@ -320,14 +325,23 @@ def build_executive_pdf(
 
     # 6. Plan de Acción
     story.append(Paragraph("3. Lineamientos de Intervención para Cabildo y Obras Públicas", heading_style))
-    acciones = (
-        f"• <b>Infraestructura Verde Focalizada:</b> Concentrar el suministro y plantación de los <b>{arboles:,} árboles nativos</b> "
-        f"exclusivamente en las unidades urbanas con déficit respecto a la meta del {meta_copa}%, empleando especies adaptadas de bajo requerimiento hídrico.<br/>"
-        "• <b>Mitigación Térmica en Corredores Peatonales (AbE):</b> Priorizar arborización lineal en banquetas y camellones dentro de las unidades "
-        "que alcanzan primero el TsE, reduciendo la carga térmica radiante (Tmrt) y el estrés por bulbo húmedo (WBT >= 28 °C).<br/>"
-        f"• <b>Gestión Azul-Verde y Drenaje Sostenible (SUDS):</b> Implementar jardines de lluvia, alcorques inundables y pavimentos permeables en las unidades "
-        f"del Quintil Superior donde coinciden islas de calor y recurrencia de precipitación extrema ({rain_str})."
-    )
+    if es_conservacion:
+        acciones = (
+            "• <b>Conservación y Protección de Dosel Existente:</b> El municipio no presenta estrés térmico urbano severo ni déficit crítico de sombra; "
+            "se recomienda mantener la cobertura arbórea actual y proteger corredores ribereños y zonas de recarga hídrica.<br/>"
+            "• <b>Arborización Preventiva en Espacios Públicos:</b> Limitar nuevas plantaciones a mantenimiento de parques, plazas y escuelas "
+            "con especies nativas de bajo mantenimiento.<br/>"
+            f"• <b>Gestión Azul-Verde y Drenaje Sostenible (SUDS):</b> Conservar áreas permeables naturales para amortiguar eventos de precipitación extrema ({rain_str})."
+        )
+    else:
+        acciones = (
+            f"• <b>Infraestructura Verde Focalizada:</b> Concentrar el suministro y plantación de los <b>{arboles:,} árboles nativos</b> "
+            f"exclusivamente en las unidades urbanas con déficit respecto a la meta del {meta_copa}%, empleando especies adaptadas de bajo requerimiento hídrico.<br/>"
+            "• <b>Mitigación Térmica en Corredores Peatonales (AbE):</b> Priorizar arborización lineal en banquetas y camellones dentro de las unidades "
+            "que alcanzan primero el TsE, reduciendo la carga térmica radiante (Tmrt) y el estrés por bulbo húmedo (WBT >= 28 °C).<br/>"
+            f"• <b>Gestión Azul-Verde y Drenaje Sostenible (SUDS):</b> Implementar jardines de lluvia, alcorques inundables y pavimentos permeables en las unidades "
+            f"del Quintil Superior donde coinciden islas de calor y recurrencia de precipitación extrema ({rain_str})."
+        )
     story.append(Paragraph(acciones, body_style))
     story.append(Spacer(1, 8))
 

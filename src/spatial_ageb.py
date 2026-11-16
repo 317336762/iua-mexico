@@ -284,11 +284,23 @@ def compute_prioridad_sombra(
     meta_json = os.path.join(mun_dir, "micro_summary.json")
     streets_geojson = os.path.join(mun_dir, "calles_criticas.geojson")
 
-    if os.path.exists(base_geojson) and os.path.exists(meta_json):
+    ageb_parquet_exists = os.path.exists("data/raw/sig/ageb.parquet")
+    usar_cache = os.path.exists(base_geojson) and os.path.exists(meta_json)
+
+    if usar_cache:
         gdf_base = gpd.read_file(base_geojson)
         with open(meta_json, "r", encoding="utf-8") as f:
             summary = json.load(f)
-    else:
+        if ageb_parquet_exists and not gdf_base.empty and str(gdf_base["Clave_AGEB"].iloc[0]).startswith("U-"):
+            usar_cache = False
+        else:
+            if ("Marginacion_idx" not in gdf_base.columns) or gdf_base["Marginacion_idx"].isna().all():
+                new_marg = compute_marginacion(gdf_base)
+                if not np.isnan(new_marg).all():
+                    gdf_base["Marginacion_idx"] = new_marg
+                    gdf_base.to_file(base_geojson, driver="GeoJSON")
+
+    if not usar_cache:
         gdf_units = build_urban_grid_or_ageb(polygon)
         bbox = list(polygon.bounds)
         wc_real, lst_real = False, False

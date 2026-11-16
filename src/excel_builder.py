@@ -6,7 +6,9 @@ from openpyxl.utils import get_column_letter
 
 def _classify_iua(tpa_val, tau_val: float) -> tuple[str | float, str]:
     """Calcula IUA y clasifica con los mismos umbrales unificados de app.py."""
-    if pd.isna(tpa_val) or float(tpa_val) <= 0:
+    if pd.isna(tpa_val):
+        return ">2100", "Baja (>2100)"
+    if float(tpa_val) <= 0:
         return "Rebasado", "Rebasado"
     iua = round(float(tau_val) / float(tpa_val), 2)
     if iua >= 1.0:
@@ -16,7 +18,6 @@ def _classify_iua(tpa_val, tau_val: float) -> tuple[str | float, str]:
     else:
         cat = "Moderada (< 0.70)"
     return iua, cat
-
 
 def _style_worksheet(ws, header_row: int = 1, freeze: bool = True):
     """Aplica estilo institucional azul petróleo (#0B3C49) y ajusta anchos de columna."""
