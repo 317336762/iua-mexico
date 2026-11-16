@@ -108,9 +108,9 @@ def build_executive_pdf(
         "KpiVal",
         parent=styles["Normal"],
         fontName="Helvetica-Bold",
-        fontSize=11.0,
+        fontSize=10.5,
         textColor=PETROL_DARK,
-        leading=14,
+        leading=13.5,
     )
     method_style = ParagraphStyle(
         "MethodStyle",
@@ -123,17 +123,19 @@ def build_executive_pdf(
 
     copa_mun = resumen.get("copa_media_pct", 0)
     lst_c = resumen.get("lst_media_c", 0)
+    n_escenas_lst = int(resumen.get("lst_escenas_compuesto", 0))
     delta_icu_aire = float(resumen.get("delta_icu_aire_c", 0))
     delta_tmax_diurno = round(0.25 * delta_icu_aire, 2)
     arboles = int(resumen.get("arboles_totales", 0))
     brecha_ha = round(float(resumen.get("brecha_total_ha", 0)), 1)
     conapo_real = resumen.get("conapo_real", True)
 
-    es_post_2100 = str(tse_val).strip() == ">2100"
-    tpa_rebasado = (not es_conservacion) and (not es_post_2100) and (tpa_val is None or float(tpa_val) <= 0)
+    es_no_aplica = es_conservacion or str(tse_val).strip() == "No aplica"
+    es_post_2100 = (not es_no_aplica) and str(tse_val).strip() == ">2100"
+    tpa_rebasado = (not es_no_aplica) and (not es_post_2100) and (tpa_val is None or float(tpa_val) <= 0)
     horizonte_max = max(2100 - int(anio_base), 1)
 
-    if es_conservacion:
+    if es_no_aplica:
         tse_disp = "No aplica"
         tpa_texto = "No aplica (Clima templado)"
         kpi_tpa_corto = "No aplica (Templado)"
@@ -151,6 +153,7 @@ def build_executive_pdf(
         kpi_tpa_corto = f"{tse_disp} ({float(tpa_val):.1f} años)"
 
     umbral_texto = f">{umbral_c} °C (TX95p)" if umbral_c is not None else "Percentil 95 local (TX95p)"
+    escenas_txt = f"de {n_escenas_lst} escenas " if n_escenas_lst > 0 else ""
 
     # 1. Encabezado institucional
     story.append(Paragraph("FICHA EJECUTIVA MUNICIPAL — CLIMA Y ADAPTACIÓN URBANA", title_style))
@@ -166,8 +169,8 @@ def build_executive_pdf(
     if respaldo_activo:
         warn_tbl = Table(
             [[Paragraph(
-                "<b>MODO DEMOSTRACIÓN / GOBERNANZA DE DATOS:</b> Este documento incluye series ilustrativas o carece de algún insumo local verificado. "
-                "No utilizar como dictamen normativo ni soporte único de obra pública.",
+                "<b>MODO DEMOSTRACIÓN / GOBERNANZA DE DATOS:</b> Este documento incluye series ilustrativas o carece de algún insumo local verificado "
+                "(p. ej., menos de 3 escenas Landsat válidas). No utilizar como dictamen normativo ni soporte único de obra pública.",
                 ParagraphStyle("Warn", parent=body_style, fontSize=8, textColor=colors.HexColor("#78350F")),
             )]],
             colWidths=[540],
@@ -201,20 +204,21 @@ def build_executive_pdf(
     story.append(banner_tbl)
     story.append(Spacer(1, 8))
 
-    # 3. Tarjetas KPI resumen
+    # 3. Tarjetas KPI resumen (sin asterisco huérfano y sin +2.2 °C topográfico en conservación)
     wbt_str = f"{wbt_max:.1f} °C ({dias_wbt28:.1f} d/año)" if (wbt_max is not None and dias_wbt28 is not None) else "Ver serie ERA5"
     rain_str = f"R99p > {p99_lluvia} mm" if p99_lluvia is not None else "Percentil 99 local"
+    lst_kpi_txt = f"{lst_c} °C (Sin ICU crítica)" if es_conservacion else f"{lst_c} °C (+{delta_icu_aire} °C)"
 
     kpi_cells = [[
-        Paragraph("Cobertura Arbórea Total (Mun.)*", kpi_label_style),
+        Paragraph("Cobertura Arbórea Total (Mun.)", kpi_label_style),
         Paragraph("LST Estival / Sensib. +Delta ICU", kpi_label_style),
         Paragraph("TsE Regional / Ventana TpA", kpi_label_style),
         Paragraph("Extremos Húmedo y Pluvial", kpi_label_style),
     ], [
         Paragraph(f"{copa_mun}%", kpi_val_style),
-        Paragraph(f"{lst_c} °C (+{delta_icu_aire} °C)", kpi_val_style),
+        Paragraph(lst_kpi_txt, kpi_val_style),
         Paragraph(kpi_tpa_corto, kpi_val_style),
-        Paragraph(f"WBT {wbt_max:.1f}°C | {p99_lluvia}mm" if (wbt_max and p99_lluvia) else wbt_str, kpi_val_style),
+        Paragraph(f"WBT {wbt_max:.1f}°C | {p99_lluvia}mm" if (wbt_max is not None and p99_lluvia is not None) else wbt_str, kpi_val_style),
     ]]
     kpi_tbl = Table(kpi_cells, colWidths=[135, 135, 135, 135])
     kpi_tbl.setStyle(TableStyle([
@@ -235,14 +239,33 @@ def build_executive_pdf(
 
     # 4. Diagnóstico Climático y Exposición Térmica Urbana
     story.append(Paragraph("1. Diagnóstico de Exposición Climática y Sensibilidad por Isla de Calor", heading_style))
-    diag_text = (
-        f"El análisis geoespacial registra una cobertura arbórea promedio de <b>{copa_mun}%</b> sobre el límite municipal total "
-        f"y una Temperatura Superficial Terrestre (LST) estival mediana de <b>{lst_c} °C</b> (compuesto Landsat 8/9 con máscara QA_PIXEL). "
-        f"Bajo la línea base regional observada (Reanálisis ERA5 vía Open-Meteo 1950–2024 + anomalías CMIP6 SSP5-8.5 P50) y el umbral local "
-        f"<b>{umbral_texto}</b>, el Tiempo sin Precedentes (<i>Climate Departure</i>) se proyecta en <b>TsE ~ {tse_disp}</b> (<b>TpA = {tpa_texto}</b>). "
-        f"Como análisis de sensibilidad urbana, un incremento atmosférico estimado de <b>+{delta_icu_aire} °C</b> por Isla de Calor "
-        f"(equivalente a <b>+{delta_tmax_diurno} °C</b> diurnos; Voogt & Oke, 2003; Mildrexler et al., 2011; Oke et al., 2017) adelanta dicho umbral en las zonas densas."
-    )
+    wbt_frag = f" (<b>WBT máx = {wbt_max:.1f} °C</b>)" if wbt_max is not None else ""
+
+    if es_conservacion:
+        diag_text = (
+            f"El análisis geoespacial registra una cobertura arbórea promedio de <b>{copa_mun}%</b> sobre el límite municipal total "
+            f"y una Temperatura Superficial Terrestre (LST) estival mediana de <b>{lst_c} °C</b> (compuesto Landsat 8/9 {escenas_txt}con máscara QA_PIXEL), "
+            f"valores propios de un régimen bioclimático templado sin isla de calor urbana crítica (la variabilidad térmica superficial observada "
+            f"responde principalmente al gradiente altitudinal del municipio). Asimismo, la humedad térmica reciente{wbt_frag} se mantiene por debajo "
+            f"del umbral operativo de estrés severo (28 °C), por lo que no se proyecta emergencia térmica urbana en el horizonte analizado."
+        )
+    elif es_no_aplica:
+        diag_text = (
+            f"El análisis geoespacial registra una cobertura arbórea promedio de <b>{copa_mun}%</b> sobre el límite municipal total "
+            f"y una Temperatura Superficial Terrestre (LST) estival mediana de <b>{lst_c} °C</b> (compuesto Landsat 8/9 {escenas_txt}con máscara QA_PIXEL). "
+            f"A escala regional (ERA5 / CMIP6 SSP5-8.5 P50) no existe estrés térmico húmedo severo{wbt_frag}; sin embargo, se identifican "
+            f"unidades urbanas densas con calentamiento superficial local y déficit de dosel que requieren arborización focalizada para mitigar "
+            f"la carga radiante peatonal (incremento urbano estimado de hasta <b>+{delta_icu_aire} °C</b>; Voogt & Oke, 2003; Mildrexler et al., 2011)."
+        )
+    else:
+        diag_text = (
+            f"El análisis geoespacial registra una cobertura arbórea promedio de <b>{copa_mun}%</b> sobre el límite municipal total "
+            f"y una Temperatura Superficial Terrestre (LST) estival mediana de <b>{lst_c} °C</b> (compuesto Landsat 8/9 {escenas_txt}con máscara QA_PIXEL). "
+            f"Bajo la línea base regional observada (Reanálisis ERA5 vía Open-Meteo 1950–2024 + anomalías CMIP6 SSP5-8.5 P50) y el umbral local "
+            f"<b>{umbral_texto}</b>, el Tiempo sin Precedentes (<i>Climate Departure</i>) se proyecta en <b>TsE ~ {tse_disp}</b> (<b>TpA = {tpa_texto}</b>). "
+            f"Como análisis de sensibilidad urbana, un incremento atmosférico estimado de <b>+{delta_icu_aire} °C</b> por Isla de Calor "
+            f"(equivalente a <b>+{delta_tmax_diurno} °C</b> diurnos; Voogt & Oke, 2003; Mildrexler et al., 2011; Oke et al., 2017) adelanta dicho umbral en las zonas densas."
+        )
     story.append(Paragraph(diag_text, body_style))
     story.append(Spacer(1, 4))
 
@@ -303,8 +326,13 @@ def build_executive_pdf(
         ],
         [
             Paragraph("ENFOQUE PRIORITARIO", tbl_bold_style),
-            Paragraph("Quintil Superior (AGEB)", tbl_bold_style),
-            Paragraph(criterio_ips_txt, tbl_bold_style),
+            Paragraph("Conservación Preventiva" if es_conservacion else "Quintil Superior (AGEB)", tbl_bold_style),
+            Paragraph(
+                "Protección de dosel existente, corredores ribereños y mantenimiento de áreas verdes públicas"
+                if es_conservacion
+                else criterio_ips_txt,
+                tbl_bold_style,
+            ),
         ],
     ]
     t = Table(inv_data, colWidths=[145, 135, 260])
@@ -338,7 +366,7 @@ def build_executive_pdf(
             f"• <b>Infraestructura Verde Focalizada:</b> Concentrar el suministro y plantación de los <b>{arboles:,} árboles nativos</b> "
             f"exclusivamente en las unidades urbanas con déficit respecto a la meta del {meta_copa}%, empleando especies adaptadas de bajo requerimiento hídrico.<br/>"
             "• <b>Mitigación Térmica en Corredores Peatonales (AbE):</b> Priorizar arborización lineal en banquetas y camellones dentro de las unidades "
-            "que alcanzan primero el TsE, reduciendo la carga térmica radiante (Tmrt) y el estrés por bulbo húmedo (WBT >= 28 °C).<br/>"
+            "con mayor isla de calor superficial, reduciendo la carga térmica radiante (Tmrt) y la exposición peatonal.<br/>"
             f"• <b>Gestión Azul-Verde y Drenaje Sostenible (SUDS):</b> Implementar jardines de lluvia, alcorques inundables y pavimentos permeables en las unidades "
             f"del Quintil Superior donde coinciden islas de calor y recurrencia de precipitación extrema ({rain_str})."
         )
@@ -350,10 +378,12 @@ def build_executive_pdf(
         "<b>TRAZABILIDAD METODOLÓGICA, VERSIONADO Y FUENTES DE DATOS (v2.0-strict)</b><br/>"
         "• <b>Estándares científicos empleados:</b> Reanálisis climático ERA5 vía Open-Meteo (1950–2024); anomalías multimodelo CMIP6 (WorldClim 2.1: ACCESS-CM2, "
         "MPI-ESM1-2-HR, MRI-ESM2-0); cobertura arbórea ESA WorldCover (10 m); compuesto multitemporal de Temperatura Superficial Terrestre Landsat 8/9 "
-        "(enmascaramiento QA_PIXEL); red vial OpenStreetMap; indicadores sociodemográficos CONAPO/INEGI. Definición de <i>Tiempo sin Precedentes (TsE)</i> "
-        "según Mora et al. (2013) sobre línea base 1981–2010; índices de extremos OMM/ETCCDI (TX95p, R99p) y umbral WBT >= 28 °C (Sherwood & Huber, 2010; Stull, 2011).<br/>"
+        "(mínimo 3 escenas estivales con enmascaramiento QA_PIXEL); red vial OpenStreetMap; indicadores sociodemográficos CONAPO/INEGI. Definición de "
+        "<i>Tiempo sin Precedentes (TsE)</i> según Mora et al. (2013) sobre línea base 1981–2010; índices de extremos OMM/ETCCDI (TX95p, R99p) y cálculo de "
+        "Temperatura de Bulbo Húmedo (WBT) mediante formulación psicrométrica de Stull (2011).<br/>"
         "• <b>Constructos operativos y capas de emulación IUA México:</b> Trayectorias anuales emuladas a partir de anomalías CMIP6 + tendencia local ERA5; "
-        "parametrización empírica de cribado Delta ICU (Voogt & Oke, 2003; Mildrexler et al., 2011); <i>Tiempo para Actuar (TpA = TsE - Año_base)</i> e "
+        "parametrización empírica de cribado Delta ICU (Voogt & Oke, 2003; Mildrexler et al., 2011); umbral operativo de estrés térmico severo WBT >= 28 °C "
+        "adoptado por el marco IUA (referencia fisiológica extrema: 35 °C en Sherwood & Huber, 2010); <i>Tiempo para Actuar (TpA = TsE - Año_base)</i> e "
         "<i>Índice de Urgencia Adaptativa (IUA = tau / TpA)</i>."
     )
     method_tbl = Table([[Paragraph(method_txt, method_style)]], colWidths=[540])

@@ -13,6 +13,7 @@ from rasterstats import zonal_stats
 from shapely.geometry import LineString, box
 
 CACHE_DIR = "data/processed/cache_municipios"
+MIN_ESCENAS_LST = 3
 
 
 def get_utm_epsg(lon: float) -> str:
@@ -172,11 +173,13 @@ def build_landsat_lst_composite(catalog, polygon, lst_tif: str, max_scenes: int 
 
     arr_stack = np.stack(stack, axis=0)
     median_lst = np.nanmedian(arr_stack, axis=0).astype(np.float32)
+    n_valid_scenes = len(stack)
 
     with rasterio.open(lst_tif, "w", **ref_meta) as dst:
         dst.write(median_lst, 1)
+        dst.update_tags(n_escenas=str(n_valid_scenes))
 
-    return len(stack)
+    return n_valid_scenes
 
 
 def fetch_fast_streets(top_geom) -> gpd.GeoDataFrame | None:
@@ -283,6 +286,7 @@ def compute_prioridad_sombra(
     base_geojson = os.path.join(mun_dir, "unidades_base.geojson")
     meta_json = os.path.join(mun_dir, "micro_summary.json")
     streets_geojson = os.path.join(mun_dir, "calles_criticas.geojson")
+    lst_tif = os.path.join(mun_dir, "lst_verano.tif")
 
     ageb_parquet_exists = os.path.exists("data/raw/sig/ageb.parquet")
     usar_cache = os.path.exists(base_geojson) and os.path.exists(meta_json)
@@ -291,7 +295,12 @@ def compute_prioridad_sombra(
         gdf_base = gpd.read_file(base_geojson)
         with open(meta_json, "r", encoding="utf-8") as f:
             summary = json.load(f)
+
+        # Invalidar caché si fue generado con malla sintética (U-0001) y ya existe ageb.parquet oficial
         if ageb_parquet_exists and not gdf_base.empty and str(gdf_base["Clave_AGEB"].iloc[0]).startswith("U-"):
+            usar_cache = False
+        # Invalidar si existe lst_verano.tif sin conteo real de escenas registrado
+        elif os.path.exists(lst_tif) and "lst_escenas_compuesto" not in summary:
             usar_cache = False
         else:
             if ("Marginacion_idx" not in gdf_base.columns) or gdf_base["Marginacion_idx"].isna().all():
@@ -299,11 +308,13 @@ def compute_prioridad_sombra(
                 if not np.isnan(new_marg).all():
                     gdf_base["Marginacion_idx"] = new_marg
                     gdf_base.to_file(base_geojson, driver="GeoJSON")
+            n_esc_cached = int(summary.get("lst_escenas_compuesto", 0))
+            summary["lst_real"] = bool(os.path.exists(lst_tif) and n_esc_cached >= MIN_ESCENAS_LST)
 
     if not usar_cache:
         gdf_units = build_urban_grid_or_ageb(polygon)
         bbox = list(polygon.bounds)
-        wc_real, lst_real = False, False
+        wc_real = False
         n_escenas_lst = 0
 
         catalog = pystac_client.Client.open(
@@ -335,14 +346,19 @@ def compute_prioridad_sombra(
         else:
             copa_pcts = [np.nan] * len(gdf_units)
 
-        lst_tif = os.path.join(mun_dir, "lst_verano.tif")
-        if not os.path.exists(lst_tif):
-            n_escenas_lst = build_landsat_lst_composite(catalog, polygon, lst_tif, max_scenes=5)
+        if os.path.exists(lst_tif):
+            with rasterio.open(lst_tif) as src_existing:
+                tag_esc = src_existing.tags().get("n_escenas")
+            if tag_esc is not None and str(tag_esc).isdigit():
+                n_escenas_lst = int(tag_esc)
+            else:
+                n_escenas_lst = build_landsat_lst_composite(catalog, polygon, lst_tif, max_scenes=5)
         else:
-            n_escenas_lst = 1
+            n_escenas_lst = build_landsat_lst_composite(catalog, polygon, lst_tif, max_scenes=5)
+
+        lst_real = bool(os.path.exists(lst_tif) and n_escenas_lst >= MIN_ESCENAS_LST)
 
         if os.path.exists(lst_tif):
-            lst_real = True
             gdf_lst = gdf_units.to_crs(rasterio.open(lst_tif).crs)
             lst_vals = [
                 round(float(s["mean"]), 2) if s["mean"] is not None else np.nan
@@ -368,7 +384,7 @@ def compute_prioridad_sombra(
             "altura_edificios_m": 6.5,
             "wc_real": wc_real,
             "lst_real": lst_real,
-            "lst_escenas_compuesto": n_escenas_lst,
+            "lst_escenas_compuesto": int(n_escenas_lst),
         }
         with open(meta_json, "w", encoding="utf-8") as f:
             json.dump(summary, f)

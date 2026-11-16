@@ -439,9 +439,9 @@ if st.button("Diagnóstico Municipal", type="primary"):
                 "umbral": umbral_real,
                 "taus": (tau_arb, tau_cor, tau_ban),
                 "meta_copa": meta_copa,
-                "modo_demo": modo_demo,
+                "modo_demo": bool(modo_demo),
             }
-        except RuntimeError as err:
+        except (RuntimeError, ValueError) as err:
             st.error(f"BLOQUEO POR GOBERNANZA DE DATOS (Modo Estricto): {err}")
 
 if "res" in st.session_state:
@@ -454,19 +454,25 @@ if "res" in st.session_state:
     df_tpa = res["df_tpa"]
     tau_arb, tau_cor, tau_ban = res["taus"]
 
+    # Congelar el modo de demostración tal como estaba al momento de ejecutar el diagnóstico
+    en_demo = bool(res.get("modo_demo", False))
+    n_escenas_lst = int(micro_eval.get("lst_escenas_compuesto", 0))
+    lst_normativo_ok = bool(micro_eval.get("lst_real", False) and n_escenas_lst >= 3)
+
     respaldos = []
     if not micro_eval.get("wc_real", True):
         respaldos.append("Cobertura arbórea (WorldCover)")
-    if not micro_eval.get("lst_real", True):
-        respaldos.append("Temperatura superficial (Landsat)")
+    if not lst_normativo_ok:
+        if n_escenas_lst > 0:
+            respaldos.append(f"Temperatura superficial Landsat (<3 escenas válidas: {n_escenas_lst})")
+        else:
+            respaldos.append("Temperatura superficial (Landsat sin escenas válidas)")
     if not res["flags"].get("era5_real", True):
         respaldos.append("Clima histórico (ERA5 / Open-Meteo)")
     if not res.get("cmip6_real", True):
         respaldos.append("Proyecciones (CMIP6)")
 
     sin_conapo = ("Marginacion_idx" not in gdf_ageb_eval.columns) or gdf_ageb_eval["Marginacion_idx"].isna().all()
-
-    en_demo = res.get("modo_demo", False) or modo_demo
     bloquear_pdf = bool(respaldos) and not en_demo
 
     if en_demo:
@@ -477,8 +483,11 @@ if "res" in st.session_state:
     elif respaldos:
         st.error(
             f"BLOQUEO NORMATIVO ACTIVO — Faltan insumos reales verificados en: {', '.join(respaldos)}. "
-            "La emisión de la Ficha Ejecutiva PDF institucional está bloqueada hasta incorporar los insumos locales o activar explícitamente el Modo Demostración."
+            "La emisión de la Ficha Ejecutiva PDF institucional está bloqueada hasta incorporar los insumos locales o recalcular en Modo Demostración."
         )
+
+    if bool(modo_demo) != en_demo:
+        st.info("Cambiaste el interruptor de Modo Demostración después de calcular. Presiona «Diagnóstico Municipal» para recalcular bajo el nuevo modo.")
 
     med_ssp5 = df_tpa[(df_tpa["Escenario"] == "SSP5-8.5") & (df_tpa["Percentil"].str.contains("P50"))].iloc[0]
 
@@ -550,44 +559,65 @@ if "res" in st.session_state:
     tse_reg_pdf = tse_reg if pd.notna(tse_reg) else ">2100"
     iua_pdf_str = f"{iua_label} — Urgencia {nivel_urgencia}"
 
-    # === FILTRO DE VALIDACIÓN RURAL / CLIMA TEMPLADO ===
+    # === FILTRO HÍBRIDO: CLIMA TEMPLADO REGIONAL VS. ISLA DE CALOR POR AGEB ===
     ult_10_pdf = df_hist[df_hist["Anio"] >= 2015]
     wbt_max_rec = float(ult_10_pdf["WBT_max_anual"].max()) if not ult_10_pdf.empty else 25.0
-    lst_mediana_mun = (
-        float(gdf_ageb_eval["LST_verano_C"].median())
-        if "LST_verano_C" in gdf_ageb_eval.columns and not gdf_ageb_eval["LST_verano_C"].isna().all()
-        else float(micro_eval.get("lst_media_c", 35.0))
-    )
     cobertura_mun = float(micro_eval.get("copa_media_pct", 0.0))
-    es_zona_templada = (lst_mediana_mun < 30.0) and (wbt_max_rec < 26.5)
+    es_conservacion = False
 
-    if es_zona_templada:
-        nivel_urgencia = "Conservación (Clima templado)"
-        iua_label = "0.00 (No aplica)"
-        iua_pdf_str = "0.00 — Conservación (Sin estrés térmico crítico)"
-        tse_reg_txt = "No aplica"
-        tpa_reg_txt = "Clima Templado"
-        tse_icu = None
-        tpa_reg = None
-        tse_reg_plot = None
-        tse_reg_pdf = "No aplica"
-        micro_eval["arboles_totales"] = 0
-        micro_eval["brecha_total_ha"] = 0.0
-        gdf_ageb_eval["Prioridad"] = "Conservación (Clima templado)"
-        gdf_ageb_eval["Arboles_equivalentes"] = 0
-        gdf_ageb_eval["Brecha_copa_ha"] = 0.0
-        texto_urgencia = (
-            f"<b>ZONA DE CONSERVACIÓN / CLIMA TEMPLADO:</b> El municipio registra una temperatura superficial estival mediana de "
-            f"<b>{lst_mediana_mun:.1f} °C</b>, bulbo húmedo máximo reciente de <b>{wbt_max_rec:.1f} °C</b> (por debajo del umbral térmico urbano) "
-            f"y una cobertura arbórea del <b>{cobertura_mun:.1f}%</b>. No presenta isla de calor severa ni déficit crítico de dosel; "
-            f"la estrategia prioritaria es la <b>conservación ambiental y manejo forestal sustentable</b>."
-        )
+    if wbt_max_rec < 26.5 and "LST_verano_C" in gdf_ageb_eval.columns:
+        lst_s = gdf_ageb_eval["LST_verano_C"].fillna(26.0)
+        copa_s = gdf_ageb_eval["Copa_pct"].fillna(cobertura_mun)
+
+        sin_estres_ageb = (lst_s < 30.0) & ~((lst_s >= 28.0) & (copa_s < res["meta_copa"]))
+
+        gdf_ageb_eval.loc[sin_estres_ageb, "Prioridad"] = "Conservación (Clima templado)"
+        gdf_ageb_eval.loc[sin_estres_ageb, "Arboles_equivalentes"] = 0
+        gdf_ageb_eval.loc[sin_estres_ageb, "Brecha_copa_ha"] = 0.0
+
+        arb_restantes = int(gdf_ageb_eval["Arboles_equivalentes"].sum())
+        ha_restantes = round(float(gdf_ageb_eval["Brecha_copa_ha"].sum()), 2)
+        micro_eval["arboles_totales"] = arb_restantes
+        micro_eval["brecha_total_ha"] = ha_restantes
+
+        if arb_restantes == 0:
+            es_conservacion = True
+            lst_mediana_mun = float(lst_s.median())
+            nivel_urgencia = "Conservación (Clima templado)"
+            iua_label = "0.00 (No aplica)"
+            iua_pdf_str = "0.00 — Conservación (Sin estrés térmico crítico)"
+            tse_reg_txt = "No aplica"
+            tpa_reg_txt = "Clima Templado"
+            tse_icu = None
+            tpa_reg = None
+            tse_reg_plot = None
+            tse_reg_pdf = "No aplica"
+            texto_urgencia = (
+                f"<b>ZONA DE CONSERVACIÓN / CLIMA TEMPLADO:</b> El municipio registra una temperatura superficial estival mediana de "
+                f"<b>{lst_mediana_mun:.1f} °C</b>, bulbo húmedo máximo reciente de <b>{wbt_max_rec:.1f} °C</b> "
+                f"y una cobertura arbórea del <b>{cobertura_mun:.1f}%</b>. Ninguna unidad urbana presenta isla de calor severa; "
+                f"la estrategia prioritaria es la <b>conservación ambiental y manejo forestal sustentable</b>."
+            )
+        else:
+            n_ageb_calor = int((~sin_estres_ageb).sum())
+            nivel_urgencia = "Focalizada (Clima templado + ICU local)"
+            iua_pdf_str = f"{iua_label} — Gestión de Isla de Calor Local"
+            texto_urgencia = (
+                f"<b>CLIMA TEMPLADO CON ISLAS DE CALOR INTRAURBANAS:</b> A escala regional no existe estrés térmico húmedo severo "
+                f"(<b>WBT máx = {wbt_max_rec:.1f} °C</b>), pero se detectan <b>{n_ageb_calor} unidades urbanas</b> con calentamiento superficial local "
+                f"y déficit de dosel que requieren <b>{arb_restantes:,} árboles nativos</b>. Las áreas frescas o arboladas se muestran en verde (Conservación)."
+            )
 
     st.subheader(f"Semáforo de Urgencia — {res['mun']}, {res['estado']}")
     st.markdown(f'<div class="banner-urgencia">{texto_urgencia}</div>', unsafe_allow_html=True)
 
     b1 = "Cobertura Arbórea: ESA WorldCover 10m" if micro_eval["wc_real"] else "Cobertura Arbórea: Sin dato real"
-    b2 = "Calor Superficial: Landsat 8/9" if micro_eval["lst_real"] else "Calor Superficial: Sin dato real"
+    if lst_normativo_ok:
+        b2 = f"Calor Superficial: Landsat 8/9 ({n_escenas_lst} escenas)"
+    elif n_escenas_lst > 0:
+        b2 = f"Calor Superficial: Landsat 8/9 ({n_escenas_lst} escena{'s' if n_escenas_lst > 1 else ''} — respaldo <3)"
+    else:
+        b2 = "Calor Superficial: Sin dato real"
     b3 = "Clima 1950–2024: Reanálisis ERA5 (Open-Meteo)" if res["flags"]["era5_real"] else "Clima: Respaldo Demo"
     b4 = "Proyección: Emulación anclada a CMIP6 (WorldClim 2.1)" if res["cmip6_real"] else "Proyección: Escalamiento Demo"
     b5 = "Red Vial: OpenStreetMap" if micro_eval["calles_real"] else "Red Vial: No disponible"
@@ -607,7 +637,7 @@ if "res" in st.session_state:
         dias_wbt28=float(ult_10_pdf["Dias_WBT28"].mean()) if not ult_10_pdf.empty else None,
         p99_lluvia=float(res["flags"]["p99_lluvia_mm"]),
         respaldo_activo=bool(respaldos) or en_demo,
-        es_conservacion=es_zona_templada,
+        es_conservacion=es_conservacion,
     )
 
     st.download_button(
@@ -624,7 +654,7 @@ if "res" in st.session_state:
     c_acc1, c_acc2, c_acc3 = st.columns(3)
 
     with c_acc1:
-        if es_zona_templada:
+        if es_conservacion:
             st.markdown("""
                 <div class="card-petroleo">
                     <b>Conservación de Dosel:</b> Mantener la cobertura vegetal existente y proteger corredores ribereños y forestales sin requerir plantación urbana masiva.
@@ -638,11 +668,18 @@ if "res" in st.session_state:
             """, unsafe_allow_html=True)
 
     with c_acc2:
-        st.markdown("""
-            <div class="card-petroleo">
-                <b>Mitigación Térmica (AbE):</b> Intervenir prioritariamente el <i>Quintil Superior</i> de déficit de sombra con arborización lineal en banquetas y camellones críticos.
-            </div>
-        """, unsafe_allow_html=True)
+        if es_conservacion:
+            st.markdown("""
+                <div class="card-petroleo">
+                    <b>Regulación Microclimática:</b> Preservar áreas permeables y vegetación ribereña que mantienen la estabilidad térmica del valle.
+                </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown("""
+                <div class="card-petroleo">
+                    <b>Mitigación Térmica (AbE):</b> Intervenir prioritariamente el <i>Quintil Superior</i> de déficit de sombra con arborización lineal en banquetas y camellones críticos.
+                </div>
+            """, unsafe_allow_html=True)
 
     with c_acc3:
         st.markdown("""
@@ -657,9 +694,9 @@ if "res" in st.session_state:
     c3.metric("TpA Regional disponible", tpa_reg_txt, help="Ventana de adaptación regional antes de TsE.")
     c4.metric(
         "Sensibilidad urbana (+ΔICU)",
-        f"{int(round(tse_icu))}" if pd.notna(tse_icu) else ("No aplica" if es_zona_templada else ">2100"),
-        delta=f"+{micro_eval['delta_icu_aire_c']} °C estimado",
-        delta_color="inverse",
+        f"{int(round(tse_icu))}" if pd.notna(tse_icu) else ("No aplica" if es_conservacion else ">2100"),
+        delta=None if es_conservacion else f"+{micro_eval['delta_icu_aire_c']} °C estimado",
+        delta_color="off" if es_conservacion else "inverse",
         help="Escenario de sensibilidad aplicando ΔICU aire estimado desde LST (Voogt & Oke, 2003; Mildrexler et al., 2011).",
     )
     c5.metric("Déficit arbóreo (AGEB)", f"{micro_eval['arboles_totales']:,}", help="Suma exclusiva de unidades urbanas por debajo de la meta de copa.")
@@ -719,7 +756,7 @@ if "res" in st.session_state:
             ),
         ).add_to(m)
 
-        if gdf_streets is not None and not gdf_streets.empty:
+        if (not es_conservacion) and gdf_streets is not None and not gdf_streets.empty:
             folium.GeoJson(
                 gdf_streets,
                 name="Vialidades críticas (llegan primero a TsE)",
@@ -737,7 +774,7 @@ if "res" in st.session_state:
         st.pyplot(fig_plume, use_container_width=True)
         plt.close(fig_plume)
 
-        if es_zona_templada:
+        if es_conservacion:
             st.info("Nota bioclimática: En municipios templados o tropicales de baja variabilidad interanual, el umbral estadístico de emergencia (TsE) puede superarse temprano sin implicar peligro térmico absoluto (LST < 30 °C y WBT < 26.5 °C).")
 
         st.markdown("**Resumen por escenario climático y horizonte temporal (Línea base regional + Sensibilidad urbana ΔICU)**")
@@ -834,10 +871,11 @@ if "res" in st.session_state:
         st.markdown("""
         * **Estándares científicos empleados:**
           * **Tiempo sin Precedentes (TsE / *Climate Departure*):** Primer año en que el promedio móvil de 20 años de días cálidos extremos supera de forma sostenida el máximo anual observado en el periodo de referencia 1981–2010 (Mora et al., 2013).
-          * **Índices de extremos climáticos (OMM / ETCCDI):** Días cálidos sobre el percentil 95 local (`TX95p`), precipitación extrema sobre el percentil 99 (`R99p`) y días con Temperatura de Bulbo Húmedo `WBT ≥ 28 °C` como umbral de estrés térmico humano severo (Sherwood & Huber, 2010; Stull, 2011).
+          * **Índices de extremos climáticos (OMM / ETCCDI):** Días cálidos sobre el percentil 95 local (`TX95p`), precipitación extrema sobre el percentil 99 (`R99p`) y Temperatura de Bulbo Húmedo estimada mediante la aproximación psicrométrica de **Stull (2011)**.
           * **Tendencias históricas:** Estimadas mediante pendiente no paramétrica de **Theil-Sen** (`días/década`) sobre el periodo **1950–2024** (Reanálisis ERA5 vía Open-Meteo).
         * **Constructos operativos y capas de emulación del marco IUA México:**
           * **Proyecciones climáticas:** Trayectorias anuales emuladas a partir de anomalías multimodelo CMIP6 (WorldClim 2.1: ACCESS-CM2, MPI-ESM1-2-HR, MRI-ESM2-0) ancladas a la tendencia local observada.
-          * **Sensibilidad por Isla de Calor Urbana ($\Delta\text{ICU}$):** Parametrización empírica de cribado a partir del gradiente térmico superficial Landsat (Voogt & Oke, 2003; Mildrexler et al., 2011), presentada como escenario urbano complementario a la línea base regional.
+          * **Umbral operativo de estrés térmico húmedo (`WBT ≥ 28 °C`):** Umbral de severidad adoptado por el marco IUA para alerta de calor húmedo urbano (frente al límite fisiológico extremo de 35 °C documentado en Sherwood & Huber, 2010).
+          * **Sensibilidad por Isla de Calor Urbana ($\Delta\text{ICU}$):** Parametrización empírica de cribado a partir del gradiente térmico superficial Landsat con compuesto mínimo de 3 escenas estivales (Voogt & Oke, 2003; Mildrexler et al., 2011), presentada como escenario urbano complementario a la línea base regional.
           * **Tiempo para Actuar ($TpA$) e Índice de Urgencia Adaptativa ($IUA = \tau / TpA$):** Razón entre el tiempo de consolidación vegetal ($\tau$) y la ventana disponible ($TpA$). Valores $\ge 1.0$ indican urgencia crítica; $0.70–0.99$ urgencia alta; $< 0.70$ ventana abierta.
         """)

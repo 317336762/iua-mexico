@@ -1,7 +1,22 @@
 import io
+import math
 import pandas as pd
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+
+
+def _clean_excel_val(val):
+    """Convierte NaN/Inf a None para que openpyxl escriba celdas vacías reales y nunca texto 'nan'."""
+    if val is None:
+        return None
+    if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+        return None
+    try:
+        if pd.isna(val):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return val
 
 
 def _classify_iua(tpa_val, tau_val: float) -> tuple[str | float, str]:
@@ -19,8 +34,9 @@ def _classify_iua(tpa_val, tau_val: float) -> tuple[str | float, str]:
         cat = "Moderada (< 0.70)"
     return iua, cat
 
+
 def _style_worksheet(ws, header_row: int = 1, freeze: bool = True):
-    """Aplica estilo institucional azul petróleo (#0B3C49) y ajusta anchos de columna."""
+    """Aplica estilo institucional azul petróleo (#0B3C49), limpia NaN y ajusta anchos de columna."""
     fill_header = PatternFill(start_color="0B3C49", end_color="0B3C49", fill_type="solid")
     fill_zebra = PatternFill(start_color="F8FAFC", end_color="F8FAFC", fill_type="solid")
     font_header = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
@@ -31,6 +47,7 @@ def _style_worksheet(ws, header_row: int = 1, freeze: bool = True):
     for row in ws.iter_rows(min_row=header_row, max_row=ws.max_row, min_col=1, max_col=ws.max_column):
         r_idx = row[0].row
         for cell in row:
+            cell.value = _clean_excel_val(cell.value)
             cell.border = border_cell
             if r_idx == header_row:
                 cell.fill = fill_header
@@ -78,6 +95,7 @@ def build_excel_report(
             ("Sin Isla de Calor (Regional)", "TSE_regional", "TpA_anios"),
             ("Con Isla de Calor (Urbano)", "TSE_con_ICU", "TpA_con_ICU"),
         ]:
+            tse_v = r[col_tse]
             tpa_v = r[col_tpa]
             iua_a, cat_a = _classify_iua(tpa_v, tau_arb)
             iua_c, _ = _classify_iua(tpa_v, tau_cor)
@@ -88,10 +106,10 @@ def build_excel_report(
                 "Escenario_CMIP6": r["Escenario"],
                 "Percentil": r["Percentil"],
                 "Condicion_Termica": condicion,
-                "Tasa_Calentamiento_C_anio": r["r_tendencia_C_anio"],
-                "Adelanto_ICU_anios": 0.0 if "Sin" in condicion else r["Adelanto_ICU_anios"],
-                "TsE_Anio_Sin_Precedentes": r[col_tse],
-                "TpA_Ventana_Adaptacion_anios": tpa_v,
+                "Tasa_Calentamiento_C_anio": _clean_excel_val(r["r_tendencia_C_anio"]),
+                "Adelanto_ICU_anios": 0.0 if "Sin" in condicion else _clean_excel_val(r["Adelanto_ICU_anios"]),
+                "TsE_Anio_Sin_Precedentes": int(round(float(tse_v))) if pd.notna(tse_v) else ">2100",
+                "TpA_Ventana_Adaptacion_anios": round(float(tpa_v), 1) if pd.notna(tpa_v) else ">2100",
                 "IUA_Arbolado": iua_a,
                 "Clasificacion_Urgencia_Arbolado": cat_a,
                 "IUA_Infraestructura_Lineal": iua_c,
@@ -100,14 +118,23 @@ def build_excel_report(
 
     df_sensibilidad = pd.DataFrame(sens_rows)
 
-    # 2. Limpieza de tabla AGEB real y fila de totales
+    # 2. Limpieza de tabla AGEB real y fila de totales (NaN -> None)
     df_ageb_clean = df_ageb.drop(columns=["geometry"], errors="ignore").copy()
-    total_arboles = int(df_ageb_clean["Arboles_equivalentes"].sum()) if "Arboles_equivalentes" in df_ageb_clean.columns else 0
+    df_ageb_clean = df_ageb_clean.map(_clean_excel_val)
+
+    total_arboles = int(df_ageb["Arboles_equivalentes"].fillna(0).sum()) if "Arboles_equivalentes" in df_ageb.columns else 0
     n_ageb_total = len(df_ageb_clean)
-    n_quintil_sup = int((df_ageb_clean["Prioridad"] == "Quintil superior").sum()) if "Prioridad" in df_ageb_clean.columns else 0
-    copa_prom_ageb = round(float(df_ageb_clean["Copa_pct"].mean()), 2) if "Copa_pct" in df_ageb_clean.columns and n_ageb_total > 0 else None
+    n_quintil_sup = int((df_ageb["Prioridad"] == "Quintil superior").sum()) if "Prioridad" in df_ageb.columns else 0
+    copa_prom_ageb = (
+        round(float(df_ageb["Copa_pct"].dropna().mean()), 2)
+        if "Copa_pct" in df_ageb.columns and df_ageb["Copa_pct"].notna().any()
+        else None
+    )
+
+    df_tx_clean = df_tx.map(_clean_excel_val)
 
     # 3. Hoja de Resumen Ejecutivo y Trazabilidad Metodológica
+    n_escenas_lst = int(micro.get("lst_escenas_compuesto", 0)) if micro else 0
     meta_rows = [
         ("DIAGNÓSTICO MUNICIPAL", municipio_nombre, "Identificador territorial evaluado"),
         ("Año base del diagnóstico", anio_base, "Configuración en config.yaml (proyecto.anio_base)"),
@@ -120,9 +147,10 @@ def build_excel_report(
         ("AGEB en Quintil Superior de prioridad", n_quintil_sup, "Unidades con mayor déficit de copa, calor superficial y vulnerabilidad"),
         ("Cobertura de copa promedio en AGEB (%)", copa_prom_ageb if copa_prom_ageb is not None else "N/D", "Promedio exclusivo de las AGEB urbanas evaluadas"),
         ("Cobertura de copa total municipal (%)", micro["copa_media_pct"] if micro else "Ver tablero", "Incluye áreas naturales/serranas dentro del límite municipal"),
+        ("Escenas Landsat 8/9 válidas en compuesto LST", n_escenas_lst if micro else "Ver tablero", "Mínimo normativo requerido: 3 escenas estivales con máscara QA_PIXEL"),
         ("Delta Isla de Calor Urbana estimado (°C)", f"+{micro['delta_icu_aire_c']}" if micro else "Ver tablero", "Diferencia térmica urbano-rural estimada por teledetección"),
         ("Déficit arbóreo total acumulado (árboles)", total_arboles, "Suma real de árboles requeridos en las AGEB por debajo de la meta"),
-        ("NOTA METODOLÓGICA — Índices estándar", "TsE (Mora et al., 2013), TX95p, R99p, WBT ≥ 28 °C", "Métricas climáticas estándar OMM / ETCCDI / IPCC"),
+        ("NOTA METODOLÓGICA — Índices estándar", "TsE (Mora et al., 2013), TX95p, R99p, WBT (Stull, 2011; umbral IUA ≥ 28 °C)", "Métricas climáticas estándar OMM / ETCCDI y umbral operativo IUA"),
         ("NOTA METODOLÓGICA — Constructos IUA", "TpA = TsE_urbano - Año_base | IUA = τ / TpA", "Operacionalización propia para planificación municipal"),
     ]
     df_meta = pd.DataFrame(meta_rows, columns=["Concepto / Indicador", "Valor", "Fuente / Criterio Técnico"])
@@ -132,13 +160,12 @@ def build_excel_report(
         df_meta.to_excel(writer, sheet_name="Resumen_Metodologia", index=False)
         df_sensibilidad.to_excel(writer, sheet_name="TpA_y_Sensibilidad", index=False)
         df_ageb_clean.to_excel(writer, sheet_name="Prioridad_Sombra", index=False)
-        df_tx.to_excel(writer, sheet_name="Serie_TX", index=False)
+        df_tx_clean.to_excel(writer, sheet_name="Serie_TX", index=False)
 
         wb = writer.book
         for sheet_name in ["Resumen_Metodologia", "TpA_y_Sensibilidad", "Prioridad_Sombra", "Serie_TX"]:
             _style_worksheet(wb[sheet_name], header_row=1, freeze=True)
 
-        # Agregar fila de totales reales al final de Prioridad_Sombra
         ws_ageb = wb["Prioridad_Sombra"]
         if n_ageb_total > 0 and "Arboles_equivalentes" in df_ageb_clean.columns:
             tot_row = ws_ageb.max_row + 1
