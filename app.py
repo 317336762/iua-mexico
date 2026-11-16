@@ -315,7 +315,8 @@ def plot_climate_index_bars(df_hist: pd.DataFrame, col_name: str, titulo: str, y
     ax.set_title(titulo, fontsize=11.5, fontweight="bold", color="#0B3C49", pad=12, loc="left")
     ax.set_xlabel("Año (1950–2024)", fontsize=10, fontweight="bold", color="#1E293B", labelpad=6)
     ax.set_ylabel(ylabel, fontsize=10, fontweight="bold", color="#1E293B", labelpad=6)
-    ax.set_ylim(bottom=0)
+    y_top = max(float(np.nanmax(valores)) * 1.18, 5.0)
+    ax.set_ylim(0, y_top)
     ax.grid(True, axis="y", linestyle="--", linewidth=0.5, color="#E2E8F0")
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -421,6 +422,7 @@ if st.button("Diagnóstico Municipal", type="primary"):
                 tau_consolidacion=tau_arb,
                 strict_mode=strict_mode,
                 ref_daily_tmax=climate_flags.get("ref_daily_tmax"),
+                recent_daily_tmax=climate_flags.get("recent_daily_tmax"),
             )
 
             st.session_state["res"] = {
