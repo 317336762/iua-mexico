@@ -253,6 +253,12 @@ def generate_serie_tx_and_tpa(
 
     unidad_cmip = str(cmip_meta.get("unidad", "anomalia_C")).strip()
     horizonte_cmip = float(cmip_meta.get("horizonte_anios", 55.0))
+    
+    # Rigor físico: Horizonte efectivo de cambio desde el anclaje reciente (2019.5) hasta 2050 (~30.5 años)
+    horizonte_efectivo = (
+        30.5 if (recent_daily_tmax and len(recent_daily_tmax) >= 5) else horizonte_cmip
+    )
+
     delta_min_fisico = r_base * 0.85 * horizonte_cmip
     delta_max_fisico = 0.085 * horizonte_cmip
 
@@ -301,7 +307,7 @@ def generate_serie_tx_and_tpa(
                         "Debe declararse 'anomalia_C' o 'tx_proj_c'."
                     )
 
-                r_scen = (delta_cmip / horizonte_cmip) * q_scale
+                r_scen = (delta_cmip / horizonte_efectivo) * q_scale
 
         r_scen = round(float(r_scen), 4)
         accel = 1.0 + (
